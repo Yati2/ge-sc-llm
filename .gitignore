@@ -22,3 +22,9 @@ results/
 *.gpickle
 *.json
 forensics/graph_hiddends/*
+
+*.pdf
+**/markdown_files/*
+**/validation_results/*
+**/**/.env
+**/__pycache__/*
