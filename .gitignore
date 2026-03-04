@@ -28,3 +28,7 @@ forensics/graph_hiddends/*
 **/validation_results/*
 **/**/.env
 **/__pycache__/*
+solodit_test_data/*
+REPOSITORY_GUIDE.md
+show_flow.py
+test*.py
