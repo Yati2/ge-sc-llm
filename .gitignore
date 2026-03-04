@@ -25,10 +25,10 @@ forensics/graph_hiddends/*
 
 *.pdf
 **/markdown_files/*
-**/validation_results/*
+**/extracted_contracts/*
 **/**/.env
 **/__pycache__/*
 solodit_test_data/*
 REPOSITORY_GUIDE.md
 show_flow.py
-test*.py
+
