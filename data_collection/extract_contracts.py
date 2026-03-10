@@ -17,6 +17,8 @@ TIER_2_DIR = OUTPUT_DIR / "tier_2_code_blocks"
 TIER_3_DIR = OUTPUT_DIR / "tier_3_snippets"
 STATS_FILE = OUTPUT_DIR / "extraction_stats.json"
 FAILED_LOG = OUTPUT_DIR / "failed_extractions.log"
+SHARED_FILES_JSON = OUTPUT_DIR / "shared_github_files.json"
+FINDINGS_JSON = Path("solodit_sequential_findings.json")
 
 # GitHub API settings
 GITHUB_RAW_URL = "https://raw.githubusercontent.com"
@@ -46,9 +48,76 @@ class ContractExtractor:
         }
         self.failed_files = []
         
+        # Track which vulnerabilities reference which GitHub files
+        # Key: github_filename (e.g., "CLOB.sol"), Value: list of {id, title, file_key}
+        self.github_file_references = {}
+        
+        # Load solodit findings for metadata access
+        self.findings_data = {}
+        if FINDINGS_JSON.exists():
+            try:
+                with open(FINDINGS_JSON, 'r', encoding='utf-8') as f:
+                    findings_list = json.load(f)
+                    # Create lookup dict by ID
+                    self.findings_data = {f['id']: f for f in findings_list}
+                print(f"📖 Loaded {len(self.findings_data)} findings from {FINDINGS_JSON}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load {FINDINGS_JSON}: {e}")
+        
         # Create output directories
         for dir_path in [TIER_1_DIR, TIER_2_DIR, TIER_3_DIR]:
             dir_path.mkdir(parents=True, exist_ok=True)
+    
+    def extract_title_from_markdown(self, md_path: Path) -> str:
+        """Extract vulnerability title from markdown file (first heading)."""
+        try:
+            with open(md_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('# '):
+                        return line[2:].strip()  # Remove '# ' prefix
+            return "Untitled Vulnerability"
+        except Exception as e:
+            print(f"  ⚠️  Error extracting title: {e}")
+            return "Untitled Vulnerability"
+    
+    def determine_failure_reason(self, vulnerability_id: str, content: str, github_urls: List[str]) -> Tuple[str, str]:
+        """Determine detailed failure reason based on finding metadata and content analysis."""
+        # Get finding metadata from solodit JSON
+        finding = self.findings_data.get(vulnerability_id, {})
+        
+        kind = finding.get('kind', 'UNKNOWN')
+        pdf_link = finding.get('pdf_link', '')
+        github_link_valid = finding.get('github_link_valid', False)
+        has_github_link = bool(finding.get('github_link', '').strip())
+        
+        # Check if any .sol files were found in URLs
+        has_sol_urls = len(github_urls) > 0
+        
+        # Determine specific failure reason
+        if pdf_link and pdf_link.strip():
+            reason = "no_code_found_pdf_source"
+            details = f"{kind} source with PDF link, no extractable code from content or valid .sol links"
+        elif has_github_link and not github_link_valid:
+            reason = "no_code_found_github_invalid"
+            details = f"{kind} source, GitHub link present but invalid/inaccessible, no code in content"
+        elif has_github_link and github_link_valid and not has_sol_urls:
+            reason = "no_code_found_github_no_sol"
+            details = f"{kind} source, valid GitHub link but no .sol files referenced, no code blocks in content"
+        elif has_github_link and github_link_valid and has_sol_urls:
+            reason = "no_code_found_github_download_failed"
+            details = f"{kind} source, .sol files found but download failed, no fallback code in content"
+        elif kind == 'MARKDOWN':
+            reason = "no_code_found_markdown_only"
+            details = f"MARKDOWN source, no GitHub links, no code blocks in content/summary"
+        elif not has_github_link:
+            reason = "no_code_found_no_source"
+            details = f"{kind} source, no GitHub link provided, no extractable code in content"
+        else:
+            reason = "no_code_found"
+            details = f"{kind} source, no extractable code in any format"
+        
+        return reason, details
     
     def extract_github_url(self, text: str) -> List[str]:
         """Extract GitHub URLs from text."""
@@ -142,6 +211,120 @@ class ContractExtractor:
         
         return code_blocks
     
+    def extract_code_blocks_with_language(self, text: str) -> List[Dict[str, str]]:
+        """Extract code blocks with their language identifiers."""
+        code_blocks = []
+        
+        # Pattern to match ```language\ncode``` blocks
+        pattern = r'```(\w+)?\n(.*?)```'
+        matches = re.findall(pattern, text, re.DOTALL)
+        
+        for language, code in matches:
+            if not language:
+                language = "unknown"
+            code_blocks.append({
+                "language": language,
+                "code": code.strip()
+            })
+        
+        return code_blocks
+    
+    def extract_recommendations(self, markdown_text: str) -> Dict:
+        """
+        Extract recommendation section from markdown.
+        
+        Looks for headers like:
+        - Recommendation
+        - Recommendations
+        - Recommended mitigation steps
+        - Mitigation
+        - Suggested Fix
+        
+        Returns:
+        {
+            "has_recommendation": bool,
+            "recommendation_text": str,
+            "fix_code_blocks": [{language: str, code: str}]
+        }
+        """
+        result = {
+            "has_recommendation": False,
+            "recommendation_text": "",
+            "fix_code_blocks": []
+        }
+        
+        # Regex to find recommendation sections (case-insensitive)
+        # Matches: ## Recommendation, ## Recommendations, ### Recommended mitigation steps, etc.
+        pattern = r'(?:^|\n)(#{1,4})\s*(Recommendation|Recommendations|Recommended\s+mitigation\s+steps?|Mitigation|Suggested\s+Fix)s?\s*\n(.*?)(?=\n#{1,4}\s+\w+|\Z)'
+        
+        match = re.search(pattern, markdown_text, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            result["has_recommendation"] = True
+            section_content = match.group(3).strip()
+            result["recommendation_text"] = section_content
+            
+            # Extract code blocks from the recommendation section
+            result["fix_code_blocks"] = self.extract_code_blocks_with_language(section_content)
+        
+        return result
+    
+    def extract_poc(self, markdown_text: str) -> Dict:
+        """
+        Extract Proof of Concept section from markdown.
+        
+        Looks for headers like:
+        - Proof of Concept
+        - PoC
+        - Exploit
+        - Exploit Scenario
+        
+        Returns:
+        {
+            "has_poc": bool,
+            "poc_text": str,
+            "poc_code_blocks": [{language: str, code: str}]
+        }
+        """
+        result = {
+            "has_poc": False,
+            "poc_text": "",
+            "poc_code_blocks": []
+        }
+        
+        # Regex to find PoC sections (case-insensitive)
+        # Matches: ## Proof of Concept, ## PoC, ### Exploit, etc.
+        pattern = r'(?:^|\n)(#{1,4})\s*(Proof\s+of\s+Concept|PoC|Exploit\s+Scenario|Exploit)s?\s*\n(.*?)(?=\n#{1,4}\s+\w+|\Z)'
+        
+        match = re.search(pattern, markdown_text, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            result["has_poc"] = True
+            section_content = match.group(3).strip()
+            result["poc_text"] = section_content
+            
+            # Extract code blocks from the PoC section
+            result["poc_code_blocks"] = self.extract_code_blocks_with_language(section_content)
+        
+        return result
+    
+    def remove_recommendation_and_poc_sections(self, markdown_text: str) -> str:
+        """
+        Remove Recommendation and PoC sections from markdown content.
+        This ensures we only extract vulnerable code, not fixes or exploits.
+        
+        Returns: markdown text with recommendation and PoC sections removed
+        """
+        # Remove Recommendation sections
+        rec_pattern = r'(?:^|\n)(#{1,4})\s*(Recommendation|Recommendations|Recommended\s+mitigation\s+steps?|Mitigation|Suggested\s+Fix)s?\s*\n(.*?)(?=\n#{1,4}\s+\w+|\Z)'
+        content = re.sub(rec_pattern, '', markdown_text, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Remove PoC sections
+        poc_pattern = r'(?:^|\n)(#{1,4})\s*(Proof\s+of\s+Concept|PoC|Exploit\s+Scenario|Exploit)s?\s*\n(.*?)(?=\n#{1,4}\s+\w+|\Z)'
+        content = re.sub(poc_pattern, '', content, flags=re.IGNORECASE | re.DOTALL)
+        
+        return content
+    
     def assess_code_quality(self, code: str) -> Dict:
         """Assess the quality and completeness of extracted code."""
         lines = code.strip().split('\n')
@@ -178,8 +361,21 @@ class ContractExtractor:
             "num_lines": num_lines
         }
     
-    def save_contract(self, vulnerability_id: str, code: str, metadata: Dict, tier: str):
+    def save_contract(self, vulnerability_id: str, code: str, metadata: Dict, tier: str, 
+                     vulnerability_title: str = None, recommendation_data: Dict = None, poc_data: Dict = None):
         """Save extracted contract and metadata."""
+        # Add vulnerability title to metadata
+        if vulnerability_title:
+            metadata['vulnerability_title'] = vulnerability_title
+        
+        # Add recommendation data to metadata
+        if recommendation_data:
+            metadata['recommendation'] = recommendation_data
+        
+        # Add PoC data to metadata
+        if poc_data:
+            metadata['poc'] = poc_data
+        
         # Determine output directory based on tier
         if tier == "tier_1":
             output_dir = TIER_1_DIR
@@ -188,12 +384,13 @@ class ContractExtractor:
         else:
             output_dir = TIER_3_DIR
         
-        # Generate filename - for Tier 1, use actual GitHub filename; for others, use vulnerability_id
+        # Generate filename
         if tier == "tier_1" and 'filename' in metadata:
-            # For Tier 1, use the actual GitHub filename
-            base_name = metadata['filename']
-            if not base_name.endswith('.sol'):
-                base_name += '.sol'
+            # For Tier 1, use format: {vulnerability_id}_{github_filename}
+            github_filename = metadata['filename']
+            if github_filename.endswith('.sol'):
+                github_filename = github_filename[:-4]  # Remove .sol extension
+            base_name = f"{vulnerability_id}_{github_filename}.sol"
         else:
             # For Tier 2 & 3, use vulnerability_id
             base_name = metadata.get('filename', f"{vulnerability_id}_contract")
@@ -203,23 +400,15 @@ class ContractExtractor:
         sol_path = output_dir / base_name
         json_path = output_dir / base_name.replace('.sol', '.json')
         
-        # Handle duplicates - for Tier 1, append vulnerability_id; for others, number them
+        # Handle duplicates with counter suffix
         if sol_path.exists():
-            if tier == "tier_1":
-                # For Tier 1 duplicates, append the vulnerability_id to show different findings
-                base_name_no_ext = base_name.replace('.sol', '')
-                base_name = f"{base_name_no_ext}_{vulnerability_id}.sol"
+            counter = 1
+            base_name_no_ext = base_name.replace('.sol', '')
+            while sol_path.exists():
+                base_name = f"{base_name_no_ext}_{counter}.sol"
                 sol_path = output_dir / base_name
                 json_path = output_dir / base_name.replace('.sol', '.json')
-            else:
-                # For Tier 2 & 3, use number counter
-                counter = 1
-                base_name_no_ext = base_name.replace('.sol', '')
-                while sol_path.exists():
-                    base_name = f"{vulnerability_id}_{counter}_contract.sol"
-                    sol_path = output_dir / base_name
-                    json_path = output_dir / base_name.replace('.sol', '.json')
-                    counter += 1
+                counter += 1
         
         # Save Solidity file
         with open(sol_path, 'w', encoding='utf-8') as f:
@@ -240,6 +429,9 @@ class ContractExtractor:
         
         self.stats['total_processed'] += 1
         
+        # Extract title from markdown
+        vulnerability_title = self.extract_title_from_markdown(md_path)
+        
         try:
             with open(md_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -247,6 +439,19 @@ class ContractExtractor:
             print(f"  ❌ Error reading file: {e}")
             self.log_failure(vulnerability_id, "file_read_error", str(e))
             return
+        
+        # Extract recommendations and PoC sections from markdown FIRST
+        recommendation_data = self.extract_recommendations(content)
+        poc_data = self.extract_poc(content)
+        
+        if recommendation_data['has_recommendation']:
+            print(f"  📋 Found Recommendation section with {len(recommendation_data['fix_code_blocks'])} code block(s)")
+        if poc_data['has_poc']:
+            print(f"  🔬 Found PoC section with {len(poc_data['poc_code_blocks'])} code block(s)")
+        
+        # Remove Recommendation and PoC sections from content before extracting vulnerable code
+        # This prevents mixing vulnerable code with fixes or exploits
+        content_for_vulnerable_code = self.remove_recommendation_and_poc_sections(content)
         
         extracted = False
         github_attempted = False
@@ -270,9 +475,9 @@ class ContractExtractor:
                 if github_info['line_start']:
                     all_line_refs.append([github_info['line_start'], github_info['line_end']])
                 
-                # Skip if we already downloaded this exact file
+                # Skip only if we already downloaded this exact file within the SAME vulnerability
                 if file_key in seen_github_files:
-                    print(f"  🔗 Duplicate: {github_info['path']} (skipping)")
+                    print(f"  🔗 Duplicate URL in same vulnerability: {github_info['path']} (skipping)")
                     continue
                 
                 seen_github_files.add(file_key)
@@ -289,6 +494,18 @@ class ContractExtractor:
                 
                 if code:
                     self.stats['github_successful'] += 1
+                    
+                    github_filename = Path(github_info['path']).name
+                    
+                    # Track file references for statistics
+                    if github_filename not in self.github_file_references:
+                        self.github_file_references[github_filename] = []
+                    self.github_file_references[github_filename].append({
+                        'id': vulnerability_id,
+                        'title': vulnerability_title,
+                        'file_key': file_key
+                    })
+                    
                     metadata = {
                         "id": vulnerability_id,
                         "extraction_type": "github_complete",
@@ -296,13 +513,14 @@ class ContractExtractor:
                         "is_complete": True,
                         "tier": "tier_1",
                         "referenced_lines": all_line_refs if all_line_refs else None,
-                        "filename": Path(github_info['path']).name
+                        "filename": github_filename
                     }
                     
                     quality = self.assess_code_quality(code)
                     metadata.update(quality)
                     
-                    self.save_contract(vulnerability_id, code, metadata, "tier_1")
+                    self.save_contract(vulnerability_id, code, metadata, "tier_1", vulnerability_title, 
+                                      recommendation_data, poc_data)
                     self.stats['by_tier']['tier_1_github_complete'] += 1
                     self.stats['by_extraction_type']['github_complete'] += 1
                     self.stats['successful_extractions'] += 1
@@ -313,8 +531,8 @@ class ContractExtractor:
         if extracted:
             return
         
-        # PRIORITY 2: Extract code blocks from markdown content
-        code_blocks = self.extract_code_blocks(content)
+        # PRIORITY 2: Extract code blocks from markdown content (excluding Recommendation/PoC sections)
+        code_blocks = self.extract_code_blocks(content_for_vulnerable_code)
         
         if code_blocks:
             print(f"  📝 Found {len(code_blocks)} code block(s)")
@@ -344,7 +562,8 @@ class ContractExtractor:
                     **quality
                 }
                 
-                self.save_contract(vulnerability_id, code, metadata, "tier_2")
+                self.save_contract(vulnerability_id, code, metadata, "tier_2", vulnerability_title,
+                                  recommendation_data, poc_data)
                 self.stats['by_tier']['tier_2_code_blocks'] += 1
                 self.stats['by_extraction_type']['markdown_code_block'] += 1
                 self.stats['successful_extractions'] += 1
@@ -363,7 +582,8 @@ class ContractExtractor:
                         "is_combined": False,
                         **quality
                     }
-                    self.save_contract(vulnerability_id, code, metadata, "tier_3")
+                    self.save_contract(vulnerability_id, code, metadata, "tier_3", vulnerability_title,
+                                      recommendation_data, poc_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['markdown_code_block'] += 1
                     self.stats['successful_extractions'] += 1
@@ -396,7 +616,8 @@ class ContractExtractor:
                         **combined_quality
                     }
                     
-                    self.save_contract(vulnerability_id, combined_code, metadata, "tier_3")
+                    self.save_contract(vulnerability_id, combined_code, metadata, "tier_3", vulnerability_title,
+                                      recommendation_data, poc_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['markdown_code_block'] += 1
                     self.stats['successful_extractions'] += 1
@@ -405,10 +626,10 @@ class ContractExtractor:
         if extracted:
             return
         
-        # PRIORITY 3: Extract inline code snippets (last resort)
+        # PRIORITY 3: Extract inline code snippets (last resort, excluding Recommendation/PoC sections)
         # Look for function definitions in plain text and combine them
         function_pattern = r'function\s+\w+\s*\([^)]*\)[^{]*\{[^}]*\}'
-        functions = re.findall(function_pattern, content, re.DOTALL)
+        functions = re.findall(function_pattern, content_for_vulnerable_code, re.DOTALL)
         
         if functions:
             valid_snippets = []
@@ -434,7 +655,8 @@ class ContractExtractor:
                         **quality
                     }
                     
-                    self.save_contract(vulnerability_id, snippet, metadata, "tier_3")
+                    self.save_contract(vulnerability_id, snippet, metadata, "tier_3", vulnerability_title,
+                                      recommendation_data, poc_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['content_snippet'] += 1
                     self.stats['successful_extractions'] += 1
@@ -463,7 +685,8 @@ class ContractExtractor:
                         **quality
                     }
                     
-                    self.save_contract(vulnerability_id, combined_code, metadata, "tier_3")
+                    self.save_contract(vulnerability_id, combined_code, metadata, "tier_3", vulnerability_title,
+                                      recommendation_data, poc_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['content_snippet'] += 1
                     self.stats['successful_extractions'] += 1
@@ -471,7 +694,9 @@ class ContractExtractor:
         
         if not extracted:
             print(f"  ❌ No code found")
-            self.log_failure(vulnerability_id, "no_code_found", "No extractable code in any format")
+            # Use enhanced failure reason determination
+            reason, details = self.determine_failure_reason(vulnerability_id, content, github_urls)
+            self.log_failure(vulnerability_id, reason, details)
     
     def log_failure(self, vulnerability_id: str, reason: str, details: str):
         """Log failed extraction."""
@@ -495,8 +720,46 @@ class ContractExtractor:
             for failure in self.failed_files:
                 f.write(f"{failure['id']}: {failure['reason']} - {failure['details']}\n")
         
+        # Save shared file references
+        self.save_shared_file_references()
+        
         print(f"\n📊 Statistics saved to: {STATS_FILE}")
-        print(f"📝 Failed extractions logged to: {FAILED_LOG}")
+        print(f"📋 Failed extractions logged to: {FAILED_LOG}")
+        if self.github_file_references:
+            print(f"🔗 Shared file references saved to: {SHARED_FILES_JSON}")
+    
+    def save_shared_file_references(self):
+        """Save information about GitHub files referenced by multiple vulnerabilities."""
+        if not self.github_file_references:
+            return
+        
+        # Prepare data for JSON export
+        shared_files_data = {
+            "total_github_files": len(self.github_file_references),
+            "files_with_multiple_refs": sum(1 for refs in self.github_file_references.values() if len(refs) > 1),
+            "files_with_single_ref": sum(1 for refs in self.github_file_references.values() if len(refs) == 1),
+            "files": {}
+        }
+        
+        # Sort files by number of references
+        sorted_files = sorted(self.github_file_references.items(), 
+                            key=lambda x: len(x[1]), reverse=True)
+        
+        for filename, refs in sorted_files:
+            shared_files_data["files"][filename] = {
+                "reference_count": len(refs),
+                "vulnerabilities": [
+                    {
+                        "id": ref['id'],
+                        "title": ref['title'],
+                        "file_key": ref['file_key']
+                    }
+                    for ref in refs
+                ]
+            }
+        
+        with open(SHARED_FILES_JSON, 'w', encoding='utf-8') as f:
+            json.dump(shared_files_data, f, indent=2, ensure_ascii=False)
     
     def print_summary(self):
         """Print extraction summary."""
@@ -524,7 +787,36 @@ class ContractExtractor:
             print(f"\nFailure Reasons:")
             for reason, count in self.stats['failure_reasons'].items():
                 print(f"  {reason}: {count}")
+        
+        # Print files referenced by multiple vulnerabilities
+        self.print_shared_file_references()
+        
         print("="*60)
+    
+    def print_shared_file_references(self):
+        """Print statistics about GitHub files referenced by multiple vulnerabilities."""
+        if not self.github_file_references:
+            return
+        
+        # Find files referenced by multiple vulnerabilities
+        multi_ref_files = {filename: refs for filename, refs in self.github_file_references.items() 
+                          if len(refs) > 1}
+        
+        if multi_ref_files:
+            print(f"\n📊 GitHub Files Referenced by Multiple Vulnerabilities:")
+            print(f"   (Total: {len(multi_ref_files)} files shared across vulnerabilities)\n")
+            
+            # Sort by number of references (descending)
+            sorted_files = sorted(multi_ref_files.items(), key=lambda x: len(x[1]), reverse=True)
+            
+            for filename, refs in sorted_files:
+                print(f"  📄 {filename} ({len(refs)} vulnerabilities):")
+                for ref in refs:
+                    title_preview = ref['title'][:70] + "..." if len(ref['title']) > 70 else ref['title']
+                    print(f"     • {ref['id']}: {title_preview}")
+                print()  # Empty line between files
+        else:
+            print(f"\n✅ No GitHub files are shared across multiple vulnerabilities")
     
     def run(self):
         """Run extraction on all markdown files."""

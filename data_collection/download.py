@@ -143,7 +143,7 @@ while new_findings_this_run < target_per_run:
         "pageSize": page_size,
         "filters": {
             "languages": [{"value": "Solidity"}],
-            "impact": ["HIGH", "MEDIUM"]
+            "impact": ["HIGH", "MEDIUM","GAS"]
         }
     }
 
