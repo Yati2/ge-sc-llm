@@ -9,6 +9,12 @@ from urllib.parse import urlparse
 load_dotenv()
 
 API_KEY = os.getenv("SOLODIT_API_KEY")
+PAGE_SIZE = int(os.getenv("PAGE_SIZE"))
+OUTPUT_FILE = os.getenv("OUTPUT_FILE")
+REPORTED_AFTER_DATE = os.getenv("REPORTED_AFTER_DATE")
+target_per_run = int(os.getenv("TARGET_RUNS"))
+
+
 
 url = "https://solodit.cyfrin.io/api/v1/solodit/findings"
 
@@ -17,8 +23,10 @@ headers = {
     "X-Cyfrin-API-Key": API_KEY
 }
 
-STATE_FILE = "download_state.json"
-OUTPUT_FILE = "solodit_sequential_findings.json"
+STATE_FILE = os.getenv("STATE_FILE")
+OUTPUT_FILE = os.getenv("OUTPUT_FILE")
+REPORTED_AFTER_DATE = os.getenv("REPORTED_AFTER_DATE")
+
 
 def load_download_state():
     """Load the download state from file, or return initial state."""
@@ -26,7 +34,7 @@ def load_download_state():
         with open(STATE_FILE, "r") as f:
             return json.load(f)
     return {
-        "page_size": 100,
+        "page_size": PAGE_SIZE,
         "last_downloaded_page": 0,
         "last_seen_finding_id": None,
         "page_completed": True
@@ -131,7 +139,6 @@ else:
 
 page = start_page
 new_findings_this_run = 0
-target_per_run = 100
 
 print(f"\nDownloading up to {target_per_run} findings...")
 
@@ -139,13 +146,18 @@ while new_findings_this_run < target_per_run:
     print(f"\nFetching page {page}... ({new_findings_this_run}/{target_per_run} findings collected)")
 
     payload = {
-        "page": page,
-        "pageSize": page_size,
-        "filters": {
-            "languages": [{"value": "Solidity"}],
-            "impact": ["HIGH", "MEDIUM","GAS"]
-        }
+    "page": page,
+    "pageSize": page_size,
+    "filters": {
+        "languages": [{"value": "Solidity"}],
+        "impact": ["HIGH", "MEDIUM"],
+
+        # "reported": {
+        #     "value": "after"
+        # },
+        # "reportedAfter": "2025-02-28T16:00:00.000Z"
     }
+}
 
     try:
         response = requests.post(url, headers=headers, json=payload)

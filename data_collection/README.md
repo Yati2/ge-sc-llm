@@ -293,3 +293,20 @@ Each `.sol` file has a corresponding `.json` metadata file:
   "extraction_date": "2026-03-05T01:23:45.678901"
 }
 ```
+
+---
+
+## Validation with OpenAI
+
+After extraction, run validation to check report-code consistency, validate tags, classify vulnerabilities (MANDO + SCSVS), and generate missing fix code blocks.
+
+See the full detailed guide here:
+
+- [README_VALIDATION.md](README_VALIDATION.md)
+
+Quick run command:
+
+```bash
+cd data_collection
+python validate_with_openai.py
+```

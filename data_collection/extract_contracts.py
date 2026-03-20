@@ -193,40 +193,18 @@ class ContractExtractor:
             return None
     
     def extract_code_blocks(self, text: str) -> List[str]:
-        """Extract Solidity code blocks from markdown."""
-        # Pattern for ```solidity code blocks
-        pattern = r'```solidity\n(.*?)```'
-        code_blocks = re.findall(pattern, text, re.DOTALL)
-        
-        # Also try ```sol
-        pattern2 = r'```sol\n(.*?)```'
-        code_blocks.extend(re.findall(pattern2, text, re.DOTALL))
-        
-        # Also try plain ``` if it looks like Solidity
-        pattern3 = r'```\n(.*?)```'
-        plain_blocks = re.findall(pattern3, text, re.DOTALL)
-        for block in plain_blocks:
-            if 'pragma solidity' in block or 'contract ' in block or 'function ' in block:
-                code_blocks.append(block)
-        
-        return code_blocks
-    
-    def extract_code_blocks_with_language(self, text: str) -> List[Dict[str, str]]:
-        """Extract code blocks with their language identifiers."""
+        """Extract fenced markdown code blocks as plain code strings."""
         code_blocks = []
-        
-        # Pattern to match ```language\ncode``` blocks
-        pattern = r'```(\w+)?\n(.*?)```'
+
+        # Capture both ```lang\n...``` and ```\n...``` forms.
+        pattern = r'```(?:\w+)?\n(.*?)```'
         matches = re.findall(pattern, text, re.DOTALL)
-        
-        for language, code in matches:
-            if not language:
-                language = "unknown"
-            code_blocks.append({
-                "language": language,
-                "code": code.strip()
-            })
-        
+
+        for code in matches:
+            stripped = code.strip()
+            if stripped:
+                code_blocks.append(stripped)
+
         return code_blocks
     
     def extract_recommendations(self, markdown_text: str) -> Dict:
@@ -244,7 +222,7 @@ class ContractExtractor:
         {
             "has_recommendation": bool,
             "recommendation_text": str,
-            "fix_code_blocks": [{language: str, code: str}]
+            "fix_code_blocks": [str]
         }
         """
         result = {
@@ -265,7 +243,7 @@ class ContractExtractor:
             result["recommendation_text"] = section_content
             
             # Extract code blocks from the recommendation section
-            result["fix_code_blocks"] = self.extract_code_blocks_with_language(section_content)
+            result["fix_code_blocks"] = self.extract_code_blocks(section_content)
         
         return result
     
@@ -283,7 +261,7 @@ class ContractExtractor:
         {
             "has_poc": bool,
             "poc_text": str,
-            "poc_code_blocks": [{language: str, code: str}]
+            "poc_code_blocks": [str]
         }
         """
         result = {
@@ -304,7 +282,7 @@ class ContractExtractor:
             result["poc_text"] = section_content
             
             # Extract code blocks from the PoC section
-            result["poc_code_blocks"] = self.extract_code_blocks_with_language(section_content)
+            result["poc_code_blocks"] = self.extract_code_blocks(section_content)
         
         return result
     
@@ -324,6 +302,126 @@ class ContractExtractor:
         content = re.sub(poc_pattern, '', content, flags=re.IGNORECASE | re.DOTALL)
         
         return content
+
+    def extract_reported_function_info(self, markdown_text: str) -> Optional[Dict[str, str]]:
+        """Extract reported function and contract names from markdown bullets."""
+        patterns = [
+            r'^\s*[*-]\s*Function:\s*`?([A-Za-z_][\w]*)\s*\(([^)`]+)\)`?\s*$',
+            r'^\s*[*-]\s*Function:\s*`?([A-Za-z_][\w]*)`?\s*$'
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, markdown_text, re.MULTILINE)
+            if not match:
+                continue
+
+            function_name = match.group(1).strip()
+            contract_name = match.group(2).strip() if len(match.groups()) > 1 and match.group(2) else None
+            return {
+                "function_name": function_name,
+                "contract_name": contract_name
+            }
+
+        return None
+
+    def find_matching_brace_line(self, lines: List[str], start_index: int, open_brace_column: int) -> Optional[int]:
+        """Find the closing brace line for a block starting at the given line/column."""
+        brace_depth = 0
+
+        for line_index in range(start_index, len(lines)):
+            line = lines[line_index]
+            column_start = open_brace_column if line_index == start_index else 0
+
+            for char in line[column_start:]:
+                if char == '{':
+                    brace_depth += 1
+                elif char == '}':
+                    brace_depth -= 1
+                    if brace_depth == 0:
+                        return line_index + 1
+
+        return None
+
+    def extract_function_snippet(self, full_code: str, function_name: str,
+                                 anchor_line: Optional[int] = None) -> Optional[Dict]:
+        """Extract the full Solidity function body for the named function."""
+        lines = full_code.splitlines()
+        function_pattern = re.compile(rf'^\s*function\s+{re.escape(function_name)}\s*\(', re.MULTILINE)
+
+        candidates = []
+        for match in function_pattern.finditer(full_code):
+            signature_start_offset = match.start()
+            signature_line = full_code.count('\n', 0, signature_start_offset) + 1
+            search_offset = match.end()
+            body_start_offset = full_code.find('{', search_offset)
+            if body_start_offset == -1:
+                continue
+
+            body_start_line = full_code.count('\n', 0, body_start_offset) + 1
+            line_start_offset = full_code.rfind('\n', 0, body_start_offset)
+            if line_start_offset == -1:
+                line_start_offset = 0
+            else:
+                line_start_offset += 1
+            open_brace_column = body_start_offset - line_start_offset
+
+            end_line = self.find_matching_brace_line(lines, body_start_line - 1, open_brace_column)
+            if end_line is None:
+                continue
+
+            candidates.append({
+                "function_name": function_name,
+                "start_line": signature_line,
+                "end_line": end_line,
+                "code": "\n".join(lines[signature_line - 1:end_line])
+            })
+
+        if not candidates:
+            return None
+
+        if anchor_line is not None:
+            for candidate in candidates:
+                if candidate["start_line"] <= anchor_line <= candidate["end_line"]:
+                    return candidate
+
+        return candidates[0]
+
+    def extract_enclosing_function_snippet(self, full_code: str, anchor_line: int) -> Optional[Dict]:
+        """Extract the full Solidity function body that encloses the given line."""
+        lines = full_code.splitlines()
+        # Keep this conservative: match canonical Solidity function declarations.
+        function_pattern = re.compile(r'^\s*function\s+([A-Za-z_][\w]*)\s*\(', re.MULTILINE)
+
+        for match in function_pattern.finditer(full_code):
+            function_name = match.group(1)
+            signature_start_offset = match.start()
+            signature_line = full_code.count('\n', 0, signature_start_offset) + 1
+            search_offset = match.end()
+            body_start_offset = full_code.find('{', search_offset)
+            if body_start_offset == -1:
+                continue
+
+            body_start_line = full_code.count('\n', 0, body_start_offset) + 1
+            line_start_offset = full_code.rfind('\n', 0, body_start_offset)
+            if line_start_offset == -1:
+                line_start_offset = 0
+            else:
+                line_start_offset += 1
+            open_brace_column = body_start_offset - line_start_offset
+
+            end_line = self.find_matching_brace_line(lines, body_start_line - 1, open_brace_column)
+            if end_line is None:
+                continue
+
+            if signature_line <= anchor_line <= end_line:
+                return {
+                    "function_name": function_name,
+                    "start_line": signature_line,
+                    "end_line": end_line,
+                    "code": "\n".join(lines[signature_line - 1:end_line])
+                }
+
+        return None
     
     def assess_code_quality(self, code: str) -> Dict:
         """Assess the quality and completeness of extracted code."""
@@ -360,10 +458,144 @@ class ContractExtractor:
             "balanced_braces": balanced_braces,
             "num_lines": num_lines
         }
+
+    def build_problem_code_from_github_refs(self, full_code: str, referenced_lines: Optional[List[List[int]]],
+                                            reported_function: Optional[Dict[str, str]] = None,
+                                            context_window: int = 15) -> Dict:
+        """Build vulnerable/problem code snippets from GitHub line references."""
+        result = {
+            "has_problem_code": False,
+            "source": "github_line_refs",
+            "snippets": []
+        }
+
+        if not referenced_lines:
+            return result
+
+        lines = full_code.splitlines()
+        total_lines = len(lines)
+
+        normalized_refs: List[Tuple[int, int]] = []
+        for line_range in referenced_lines:
+            if not isinstance(line_range, list) or len(line_range) < 1:
+                continue
+
+            try:
+                start_raw = line_range[0]
+                end_raw = line_range[1] if len(line_range) > 1 else None
+                if start_raw is None:
+                    continue
+
+                start_line = max(1, int(start_raw))
+                end_line = int(end_raw) if end_raw is not None else start_line
+                end_line = max(start_line, min(total_lines, end_line))
+                normalized_refs.append((start_line, end_line))
+            except (TypeError, ValueError):
+                continue
+
+        if not normalized_refs:
+            return result
+
+        snippet_index_by_range = {}
+
+        # Prefer function-level extraction for each reported vulnerable reference line.
+        for start_line, end_line in normalized_refs:
+            enclosing = self.extract_enclosing_function_snippet(full_code=full_code, anchor_line=start_line)
+            if not enclosing:
+                continue
+
+            key = (enclosing['start_line'], enclosing['end_line'])
+            if key in snippet_index_by_range:
+                idx = snippet_index_by_range[key]
+                result['snippets'][idx].setdefault('matched_references', []).append([start_line, end_line])
+                continue
+
+            enclosing['confidence'] = 97
+            enclosing['reason'] = 'Function enclosing GitHub-referenced vulnerable line'
+            enclosing['matched_references'] = [[start_line, end_line]]
+            result['snippets'].append(enclosing)
+            snippet_index_by_range[key] = len(result['snippets']) - 1
+
+        if result['snippets']:
+            result['source'] = 'github_line_refs_function_scope'
+            result['has_problem_code'] = True
+
+        # Keep backward-compatible reported-function metadata enrichment when available.
+        if reported_function and reported_function.get('contract_name'):
+            for snippet in result['snippets']:
+                snippet.setdefault('contract_name', reported_function['contract_name'])
+
+        # Fallback to context window snippets only for references not mapped to a function.
+        covered_refs = set()
+        for snippet in result['snippets']:
+            for ref in snippet.get('matched_references', []):
+                if isinstance(ref, list) and len(ref) >= 2:
+                    covered_refs.add((ref[0], ref[1]))
+
+        for start_line, end_line in normalized_refs:
+            if (start_line, end_line) in covered_refs:
+                continue
+
+            ctx_start = max(1, start_line - context_window)
+            ctx_end = min(total_lines, end_line + context_window)
+
+            snippet = "\n".join(lines[ctx_start - 1:ctx_end])
+            result["snippets"].append({
+                "code": snippet,
+                "start_line": start_line,
+                "end_line": end_line,
+                "context_start_line": ctx_start,
+                "context_end_line": ctx_end,
+                "confidence": 95,
+                "reason": "GitHub URL includes explicit vulnerable line references"
+            })
+
+        if result["snippets"]:
+            result["has_problem_code"] = True
+
+        return result
+
+    def build_problem_code_from_markdown_blocks(self, blocks: List[Tuple[int, str, Dict]]) -> Dict:
+        """Build vulnerable/problem code snippets from markdown code blocks."""
+        snippets = []
+        for idx, code, _quality in blocks:
+            snippets.append({
+                "code": code.strip(),
+                "block_index": idx,
+                "confidence": 85,
+                "reason": "Code block from markdown after removing Recommendation/PoC sections"
+            })
+
+        return {
+            "has_problem_code": bool(snippets),
+            "source": "markdown_blocks",
+            "snippets": snippets
+        }
+
+    def build_problem_code_from_inline_snippets(self, snippets: List[Tuple[int, str]]) -> Dict:
+        """Build vulnerable/problem code snippets from inline function-like snippets."""
+        formatted = []
+        for idx, snippet in snippets:
+            formatted.append({
+                "code": snippet.strip(),
+                "snippet_index": idx,
+                "confidence": 70,
+                "reason": "Inline function pattern found outside Recommendation/PoC sections"
+            })
+
+        return {
+            "has_problem_code": bool(formatted),
+            "source": "inline_snippets",
+            "snippets": formatted
+        }
     
-    def save_contract(self, vulnerability_id: str, code: str, metadata: Dict, tier: str, 
-                     vulnerability_title: str = None, recommendation_data: Dict = None, poc_data: Dict = None):
+    def save_contract(self, vulnerability_id: str, code: str, metadata: Dict, tier: str,
+                     vulnerability_title: str = None, recommendation_data: Dict = None,
+                     poc_data: Dict = None, problem_code_data: Dict = None):
         """Save extracted contract and metadata."""
+        # Preserve extraction tier as canonical tier in metadata.
+        metadata['tier'] = tier
+
         # Add vulnerability title to metadata
         if vulnerability_title:
             metadata['vulnerability_title'] = vulnerability_title
@@ -375,6 +607,10 @@ class ContractExtractor:
         # Add PoC data to metadata
         if poc_data:
             metadata['poc'] = poc_data
+
+        # Add vulnerable/problem code snippets to metadata
+        if problem_code_data:
+            metadata['problem_code'] = problem_code_data
         
         # Determine output directory based on tier
         if tier == "tier_1":
@@ -443,11 +679,15 @@ class ContractExtractor:
         # Extract recommendations and PoC sections from markdown FIRST
         recommendation_data = self.extract_recommendations(content)
         poc_data = self.extract_poc(content)
+        reported_function = self.extract_reported_function_info(content)
         
         if recommendation_data['has_recommendation']:
             print(f"  📋 Found Recommendation section with {len(recommendation_data['fix_code_blocks'])} code block(s)")
         if poc_data['has_poc']:
             print(f"  🔬 Found PoC section with {len(poc_data['poc_code_blocks'])} code block(s)")
+        if reported_function:
+            contract_suffix = f" ({reported_function['contract_name']})" if reported_function.get('contract_name') else ""
+            print(f"  🎯 Reported function: {reported_function['function_name']}{contract_suffix}")
         
         # Remove Recommendation and PoC sections from content before extracting vulnerable code
         # This prevents mixing vulnerable code with fixes or exploits
@@ -459,10 +699,18 @@ class ContractExtractor:
         # PRIORITY 1: GitHub links to .sol files (download complete file, ignore line numbers)
         # For Tier 1: Download each UNIQUE .sol file only ONCE (not per URL)
         github_urls = self.extract_github_url(content)
+
+        # Collect all referenced line ranges first, even if multiple URLs point to the same file.
+        # This ensures problem_code can include all vulnerable functions tied to those references.
+        all_line_refs = []  # Collect all line references for metadata
+        for url in github_urls:
+            github_info = self.parse_github_url(url)
+            if github_info and github_info['is_sol_file'] and github_info['line_start']:
+                normalized_end = github_info['line_end'] if github_info['line_end'] is not None else github_info['line_start']
+                all_line_refs.append([github_info['line_start'], normalized_end])
         
         # Track unique files by their path to avoid duplicate downloads
         seen_github_files = set()
-        all_line_refs = []  # Collect all line references for metadata
         
         for url in github_urls:
             github_info = self.parse_github_url(url)
@@ -470,10 +718,6 @@ class ContractExtractor:
             if github_info and github_info['is_sol_file']:
                 # Create unique key for this file
                 file_key = f"{github_info['owner']}/{github_info['repo']}/{github_info['branch']}/{github_info['path']}"
-                
-                # Track line references
-                if github_info['line_start']:
-                    all_line_refs.append([github_info['line_start'], github_info['line_end']])
                 
                 # Skip only if we already downloaded this exact file within the SAME vulnerability
                 if file_key in seen_github_files:
@@ -486,7 +730,8 @@ class ContractExtractor:
                 
                 lines_info = ""
                 if github_info['line_start']:
-                    lines_info = f" (ref lines {github_info['line_start']}-{github_info['line_end']})"
+                    line_end_display = github_info['line_end'] if github_info['line_end'] is not None else github_info['line_start']
+                    lines_info = f" (ref lines {github_info['line_start']}-{line_end_display})"
                 print(f"  🔗 GitHub .sol: {github_info['path']}{lines_info}")
                 
                 # Download the COMPLETE file (ignore line numbers)
@@ -515,12 +760,58 @@ class ContractExtractor:
                         "referenced_lines": all_line_refs if all_line_refs else None,
                         "filename": github_filename
                     }
+                    if reported_function:
+                        metadata['reported_function'] = reported_function
                     
                     quality = self.assess_code_quality(code)
                     metadata.update(quality)
+
+                    problem_code_data = self.build_problem_code_from_github_refs(
+                        full_code=code,
+                        referenced_lines=all_line_refs,
+                        reported_function=reported_function
+                    )
+
+                    # If all references are single-line (e.g., #L280), prefer richer vulnerable
+                    # snippets extracted from report content after removing Recommendation/PoC.
+                    is_single_line_only_refs = bool(all_line_refs) and all(
+                        isinstance(ref, list) and len(ref) >= 2 and ref[0] == ref[1]
+                        for ref in all_line_refs
+                    )
+
+                    if is_single_line_only_refs and problem_code_data.get('source') == 'github_line_refs':
+                        markdown_blocks = self.extract_code_blocks(content_for_vulnerable_code)
+                        markdown_problem_blocks = []
+                        for idx, block in enumerate(markdown_blocks):
+                            block_quality = self.assess_code_quality(block)
+                            if block_quality['tier'] is not None:
+                                markdown_problem_blocks.append((idx, block, block_quality))
+
+                        if markdown_problem_blocks:
+                            print("    ℹ️  Single-line GitHub reference; using markdown vulnerable code blocks for problem_code")
+                            problem_code_data = self.build_problem_code_from_markdown_blocks(markdown_problem_blocks)
+                        else:
+                            function_pattern = r'function\s+\w+\s*\([^)]*\)[^{]*\{[^}]*\}'
+                            inline_functions = re.findall(function_pattern, content_for_vulnerable_code, re.DOTALL)
+                            inline_problem_snippets = []
+                            for idx, snippet in enumerate(inline_functions):
+                                if len(snippet) >= 50:
+                                    inline_problem_snippets.append((idx, snippet))
+
+                            if inline_problem_snippets:
+                                print("    ℹ️  Single-line GitHub reference; using inline vulnerable snippets for problem_code")
+                                problem_code_data = self.build_problem_code_from_inline_snippets(inline_problem_snippets)
+
+                    if not problem_code_data['has_problem_code']:
+                        problem_code_data = {
+                            "has_problem_code": False,
+                            "source": "github_line_refs",
+                            "snippets": [],
+                            "reason": "No line references available in GitHub URL"
+                        }
                     
                     self.save_contract(vulnerability_id, code, metadata, "tier_1", vulnerability_title, 
-                                      recommendation_data, poc_data)
+                                      recommendation_data, poc_data, problem_code_data)
                     self.stats['by_tier']['tier_1_github_complete'] += 1
                     self.stats['by_extraction_type']['github_complete'] += 1
                     self.stats['successful_extractions'] += 1
@@ -561,9 +852,11 @@ class ContractExtractor:
                     "block_index": idx,
                     **quality
                 }
+
+                problem_code_data = self.build_problem_code_from_markdown_blocks([(idx, code, quality)])
                 
                 self.save_contract(vulnerability_id, code, metadata, "tier_2", vulnerability_title,
-                                  recommendation_data, poc_data)
+                                  recommendation_data, poc_data, problem_code_data)
                 self.stats['by_tier']['tier_2_code_blocks'] += 1
                 self.stats['by_extraction_type']['markdown_code_block'] += 1
                 self.stats['successful_extractions'] += 1
@@ -582,8 +875,9 @@ class ContractExtractor:
                         "is_combined": False,
                         **quality
                     }
+                    problem_code_data = self.build_problem_code_from_markdown_blocks([(idx, code, quality)])
                     self.save_contract(vulnerability_id, code, metadata, "tier_3", vulnerability_title,
-                                      recommendation_data, poc_data)
+                                      recommendation_data, poc_data, problem_code_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['markdown_code_block'] += 1
                     self.stats['successful_extractions'] += 1
@@ -615,9 +909,11 @@ class ContractExtractor:
                         "original_total_lines": total_lines,
                         **combined_quality
                     }
+
+                    problem_code_data = self.build_problem_code_from_markdown_blocks(tier_3_blocks)
                     
                     self.save_contract(vulnerability_id, combined_code, metadata, "tier_3", vulnerability_title,
-                                      recommendation_data, poc_data)
+                                      recommendation_data, poc_data, problem_code_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['markdown_code_block'] += 1
                     self.stats['successful_extractions'] += 1
@@ -654,9 +950,11 @@ class ContractExtractor:
                         "is_combined": False,
                         **quality
                     }
+
+                    problem_code_data = self.build_problem_code_from_inline_snippets([(idx, snippet)])
                     
                     self.save_contract(vulnerability_id, snippet, metadata, "tier_3", vulnerability_title,
-                                      recommendation_data, poc_data)
+                                      recommendation_data, poc_data, problem_code_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['content_snippet'] += 1
                     self.stats['successful_extractions'] += 1
@@ -684,9 +982,11 @@ class ContractExtractor:
                         "snippet_indices": snippet_indices,
                         **quality
                     }
+
+                    problem_code_data = self.build_problem_code_from_inline_snippets(valid_snippets)
                     
                     self.save_contract(vulnerability_id, combined_code, metadata, "tier_3", vulnerability_title,
-                                      recommendation_data, poc_data)
+                                      recommendation_data, poc_data, problem_code_data)
                     self.stats['by_tier']['tier_3_snippets'] += 1
                     self.stats['by_extraction_type']['content_snippet'] += 1
                     self.stats['successful_extractions'] += 1

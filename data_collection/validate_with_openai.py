@@ -11,11 +11,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Configuration (loaded from .env with defaults)
 CONFIG = {
     'model': os.getenv('OPENAI_MODEL'),
-    'max_code_length': int(os.getenv('OPENAI_MAX_CODE_LENGTH')),
-    'max_content_length': int(os.getenv('OPENAI_MAX_CONTENT_LENGTH')),
     'temperature': float(os.getenv('OPENAI_TEMPERATURE')),
     'rate_limit_delay': float(os.getenv('OPENAI_RATE_LIMIT_DELAY')),
     'retry_attempts': int(os.getenv('OPENAI_RETRY_ATTEMPTS')),
@@ -27,7 +24,8 @@ CONFIG = {
 }
 
 # Paths
-FINDINGS_JSON = Path("solodit_sequential_findings.json")
+file_name = os.getenv("OUTPUT_FILE")
+FINDINGS_JSON = Path(file_name)
 EXTRACTED_DIR = Path("extracted_contracts")
 VALIDATION_DIR = Path("validation_results")
 
@@ -111,12 +109,6 @@ class ContractValidator:
         # Create output directory
         VALIDATION_DIR.mkdir(exist_ok=True)
     
-    def truncate_text(self, text: str, max_length: int) -> str:
-        """Truncate text to max length."""
-        if len(text) <= max_length:
-            return text
-        return text[:max_length] + "..."
-    
     def get_system_prompt(self) -> str:
         """Get system prompt for OpenAI."""
         return """You are an expert smart contract security auditor with deep knowledge of Solidity vulnerabilities and the SCSVS (Smart Contract Security Verification Standard).
@@ -130,30 +122,41 @@ IMPORTANT:
 
 Respond ONLY with valid JSON. Be precise and concise in your reasoning."""
     
-    def get_user_prompt(self, vuln_id: str, title: str, summary: str, content: str, 
-                       impact: str, existing_tag: Optional[str], code: str, tier: str) -> str:
+    def get_user_prompt(self, vuln_id: str, title: str, summary: str, content: str,
+                       existing_tag: Optional[str], code: str, tier: str,
+                       code_source: str, fix_code: Optional[str] = None) -> str:
         """Generate user prompt for validation."""
-        
-        content_truncated = self.truncate_text(content, CONFIG['max_content_length'])
-        code_truncated = self.truncate_text(code, CONFIG['max_code_length'])
+
+        content_full = content
+        code_full = code
+        fix_code_full = fix_code if fix_code else ""
         
         mando_desc = "\n".join([f"  - {k}: {v}" for k, v in MANDO_CATEGORIES.items()])
         scsvs_desc = "\n".join([f"  - {k}: {v}" for k, v in SCSVS_CATEGORIES.items()])
         
+        fix_section = ""
+        if fix_code_full:
+            fix_section = f"""
+    ## Provided Fix Code (if applicable)
+    ```solidity
+    {fix_code_full}
+    ```
+    """
+
         return f"""# Vulnerability Report Analysis
 
 ## Report Details
 - ID: {vuln_id}
 - Title: {title}
-- Impact: {impact}
 - Summary: {summary}
-- Content: {content_truncated}
+- Content: {content_full}
 - Existing Tag: {existing_tag or "None"}
 
-## Extracted Solidity Code ({tier})
+## Extracted Problem Code ({tier}, source: {code_source})
 ```solidity
-{code_truncated}
+{code_full}
 ```
+{fix_section}
 
 # Tasks
 
@@ -222,13 +225,107 @@ Current tag: "{existing_tag or "None"}"
     "use_scsvs_instead": true/false,
     "reasoning": "detailed explanation of SCSVS mapping",
     "vulnerability_type": "brief description"
-  }},
-  "severity_assessment": {{
-    "reported_severity": "{impact}",
-    "severity_justified": true/false,
-    "reasoning": "explanation"
   }}
 }}"""
+
+    def build_problem_code_input(self, metadata: Dict, sol_path: Path) -> Tuple[str, str]:
+        """Build focused problem code input from metadata.problem_code with fallback to full .sol."""
+        problem_data = metadata.get('problem_code', {})
+        snippets = problem_data.get('snippets', []) if isinstance(problem_data, dict) else []
+        problem_source = problem_data.get('source', 'problem_code') if isinstance(problem_data, dict) else 'problem_code'
+
+        if snippets:
+            formatted = []
+            for idx, snippet in enumerate(snippets, 1):
+                if not isinstance(snippet, dict):
+                    continue
+                start_line = snippet.get('start_line')
+                end_line = snippet.get('end_line')
+                reason = snippet.get('reason', '')
+                header_parts = [f"Snippet {idx}"]
+                if start_line and end_line:
+                    header_parts.append(f"lines {start_line}-{end_line}")
+                if reason:
+                    header_parts.append(reason)
+                header = " | ".join(header_parts)
+                formatted.append(f"// {header}\n{snippet.get('code', '').strip()}")
+
+            if formatted:
+                return "\n\n".join(formatted).strip(), problem_source
+
+        if isinstance(problem_data, str) and problem_data.strip():
+            return problem_data.strip(), 'problem_code_text'
+
+        if not sol_path.exists():
+            return "", "missing"
+
+        with open(sol_path, 'r') as f:
+            code = f.read()
+        return code, "full_sol_fallback"
+
+    def build_provided_fix_code_input(self, metadata: Dict) -> str:
+        """Build fix code input from recommendation code blocks, if available."""
+        recommendation = metadata.get('recommendation', {})
+        if isinstance(recommendation, dict):
+            fix_blocks = recommendation.get('fix_code_blocks', [])
+        elif isinstance(recommendation, list):
+            fix_blocks = recommendation
+        else:
+            fix_blocks = []
+
+        if not fix_blocks:
+            return ""
+
+        merged = []
+        for idx, block in enumerate(fix_blocks, 1):
+            if isinstance(block, dict):
+                code = block.get('code', '').strip()
+            elif isinstance(block, str):
+                code = block.strip()
+            else:
+                continue
+
+            if not code:
+                continue
+            merged.append(f"// Fix block {idx}\n{code}")
+
+        return "\n\n".join(merged).strip()
+
+    def build_problem_snippets_for_fix(self, metadata: Dict, vulnerable_code: str) -> List[Dict]:
+        """Build normalized problem snippets used to request one fixed function per snippet."""
+        problem_data = metadata.get('problem_code', {})
+        snippets = problem_data.get('snippets', []) if isinstance(problem_data, dict) else []
+
+        normalized = []
+        for idx, snippet in enumerate(snippets, 1):
+            if not isinstance(snippet, dict):
+                continue
+
+            code = (snippet.get('code') or '').strip()
+            if not code:
+                continue
+
+            normalized.append({
+                'snippet_index': idx,
+                'code': code,
+                'start_line': snippet.get('start_line'),
+                'end_line': snippet.get('end_line'),
+                'reason': snippet.get('reason', '')
+            })
+
+        if normalized:
+            return normalized
+
+        if vulnerable_code.strip():
+            return [{
+                'snippet_index': 1,
+                'code': vulnerable_code.strip(),
+                'start_line': None,
+                'end_line': None,
+                'reason': 'fallback_full_context'
+            }]
+
+        return []
     
     def call_openai(self, system_prompt: str, user_prompt: str) -> Dict:
         """Call OpenAI API with retry logic."""
@@ -260,19 +357,39 @@ Current tag: "{existing_tag or "None"}"
                     raise
                 time.sleep(2)
     
-    def generate_fix_code(self, vuln_id: str, title: str, summary: str, 
-                         recommendation_text: str, vulnerable_code: str, 
-                         vulnerability_type: str) -> Dict:
+    def generate_fix_code(self, vuln_id: str, title: str, summary: str,
+                         recommendation_text: str, vulnerable_code: str,
+                         vulnerability_type: str,
+                         problem_snippets: Optional[List[Dict]] = None) -> Dict:
         """Generate fix code when recommendation doesn't provide it."""
-        
+
         system_prompt = """You are an expert Solidity developer and security auditor.
 
 Your task is to generate secure, fixed code based on a vulnerability report and recommendation.
 
 Provide ONLY valid JSON with the fixed code and explanation."""
-        
-        code_truncated = self.truncate_text(vulnerable_code, CONFIG['max_code_length'])
-        
+
+        code_full = vulnerable_code
+        snippet_blocks = []
+        for snippet in (problem_snippets or []):
+            snippet_index = snippet.get('snippet_index')
+            start_line = snippet.get('start_line')
+            end_line = snippet.get('end_line')
+            reason = snippet.get('reason') or ''
+            line_info = ""
+            if start_line and end_line:
+                line_info = f" | lines {start_line}-{end_line}"
+            reason_info = f" | reason: {reason}" if reason else ""
+            snippet_blocks.append(
+                f"### Problem Snippet {snippet_index}{line_info}{reason_info}\n"
+                f"```\n{snippet.get('code', '').strip()}\n```"
+            )
+
+        snippets_section = "\n\n".join(snippet_blocks).strip()
+        if not snippets_section:
+            snippets_section = f"### Problem Snippet 1\n```\n{code_full}\n```"
+
+        snippet_count = len(problem_snippets or []) if problem_snippets else 1
         user_prompt = f"""# Fix Code Generation
 
 ## Vulnerability Details
@@ -281,10 +398,13 @@ Provide ONLY valid JSON with the fixed code and explanation."""
 - Summary: {summary}
 - Type: {vulnerability_type}
 
-## Vulnerable Code
-```solidity
-{code_truncated}
+## Vulnerable Code (All Context)
 ```
+{code_full}
+```
+
+## Problem Snippets To Fix ({snippet_count} block(s))
+{snippets_section}
 
 ## Recommendation
 {recommendation_text}
@@ -294,34 +414,84 @@ Provide ONLY valid JSON with the fixed code and explanation."""
 Generate secure fixed code that addresses the vulnerability described above.
 
 **Requirements:**
-1. Generate complete, compilable Solidity code
-2. Include inline comments explaining the fixes
-3. Maintain the original function signatures and logic flow
-4. Apply security best practices
-5. If the vulnerable code is a snippet, provide the fixed snippet with surrounding context
+1. For each problem snippet, return one full fixed function (not a partial snippet)
+2. If there are multiple problem snippets, return multiple fixed function blocks in the same order
+3. Keep function signatures compatible unless changing signature is required for security
+4. Include concise inline comments only where needed to explain security changes
+5. Apply Solidity security best practices and preserve intended behavior
+6. Do not include language identifiers in code fences or output fields
 
 # Response Format (JSON only)
 
 {{
   "has_fix": true,
   "fix_approach": "brief description of the fix strategy",
-  "fix_code": "complete fixed solidity code with inline comments",
+    "fixed_code_blocks": [
+        {{
+            "snippet_index": 1,
+            "function_name": "functionName",
+            "fixed_function_code": "complete fixed function code",
+            "reasoning": "how this function fix addresses the vulnerability"
+        }}
+    ],
   "key_changes": ["change1", "change2", "change3"],
   "security_improvements": ["improvement1", "improvement2"],
   "additional_recommendations": "any additional security advice",
   "confidence": 0-100
 }}
 """
-        
+
         try:
             result = self.call_openai(system_prompt, user_prompt)
+
+            # Normalize output to ensure one fixed function block per problem snippet.
+            blocks = result.get('fixed_code_blocks', [])
+            if not isinstance(blocks, list):
+                blocks = []
+
+            normalized_blocks = []
+            for idx, block in enumerate(blocks, 1):
+                if not isinstance(block, dict):
+                    continue
+                code = (block.get('fixed_function_code') or '').strip()
+                if not code:
+                    continue
+                normalized_blocks.append({
+                    'snippet_index': block.get('snippet_index', idx),
+                    'function_name': block.get('function_name', ''),
+                    'fixed_function_code': code,
+                    'reasoning': block.get('reasoning', '')
+                })
+
+            # Backward compatibility: if model returns legacy single `fix_code` string.
+            if not normalized_blocks:
+                legacy_fix_code = result.get('fix_code', '')
+                if isinstance(legacy_fix_code, str) and legacy_fix_code.strip():
+                    normalized_blocks = [{
+                        'snippet_index': 1,
+                        'function_name': '',
+                        'fixed_function_code': legacy_fix_code.strip(),
+                        'reasoning': 'derived from legacy fix_code field'
+                    }]
+
+            expected_blocks = max(1, snippet_count)
+            returned_blocks = len(normalized_blocks)
+
+            result['fixed_code_blocks'] = normalized_blocks
+            result['fix_code'] = "\n\n".join(
+                [b['fixed_function_code'] for b in normalized_blocks]
+            ).strip()
+            result['expected_fixed_blocks'] = expected_blocks
+            result['returned_fixed_blocks'] = returned_blocks
+            result['block_count_match'] = (returned_blocks == expected_blocks)
+
             result['generated_by'] = 'openai'
             result['generation_date'] = datetime.now().isoformat()
             return result
         except Exception as e:
             print(f"  Warning: Fix code generation failed: {e}")
             return {
-                "has_fix": false,
+                "has_fix": False,
                 "error": str(e),
                 "generated_by": 'openai',
                 "generation_date": datetime.now().isoformat()
@@ -344,14 +514,15 @@ Generate secure fixed code that addresses the vulnerability described above.
         
         report = self.findings[vuln_id]
         
-        # Load extracted code
+        # Build focused problem code input (preferred) with fallback to full .sol
         sol_path = json_path.with_suffix('.sol')
-        if not sol_path.exists():
-            print(f"  Warning: .sol file not found for {vuln_id}")
+        code, code_source = self.build_problem_code_input(metadata, sol_path)
+        if not code:
+            print(f"  Warning: No code found for {vuln_id}")
             return None
-        
-        with open(sol_path, 'r') as f:
-            code = f.read()
+
+        # Build provided fix code input (if available)
+        provided_fix_code = self.build_provided_fix_code_input(metadata)
         
         # Extract existing tag
         existing_tag = None
@@ -367,10 +538,11 @@ Generate secure fixed code that addresses the vulnerability described above.
             title=report['title'],
             summary=report['summary'],
             content=report['content'],
-            impact=report['impact'],
             existing_tag=existing_tag,
             code=code,
-            tier=tier
+            tier=tier,
+            code_source=code_source,
+            fix_code=provided_fix_code
         )
         
         # Call OpenAI
@@ -378,22 +550,34 @@ Generate secure fixed code that addresses the vulnerability described above.
         
         # Check if fix code needs to be generated
         recommendation_data = metadata.get('recommendation', {})
-        has_recommendation = recommendation_data.get('has_recommendation', False)
-        has_fix_code = bool(recommendation_data.get('fix_code_blocks', []))
+        if isinstance(recommendation_data, dict):
+            has_recommendation = recommendation_data.get('has_recommendation', False)
+            has_fix_code = bool(recommendation_data.get('fix_code_blocks', []))
+            recommendation_text = recommendation_data.get('recommendation_text', '')
+        elif isinstance(recommendation_data, str):
+            has_recommendation = bool(recommendation_data.strip())
+            has_fix_code = False
+            recommendation_text = recommendation_data
+        else:
+            has_recommendation = False
+            has_fix_code = False
+            recommendation_text = ''
         
         if has_recommendation and not has_fix_code:
             # Generate fix code
             print(f"  🛠️  Generating fix code...")
             vulnerability_type = validation_results.get('scsvs_classification', {}).get('vulnerability_type', '') or \
                                validation_results.get('mando_classification', {}).get('primary_category', '')
+            problem_snippets = self.build_problem_snippets_for_fix(metadata, code)
             
             fix_code = self.generate_fix_code(
                 vuln_id=vuln_id,
                 title=report['title'],
                 summary=report['summary'],
-                recommendation_text=recommendation_data.get('recommendation_text', ''),
+                recommendation_text=recommendation_text,
                 vulnerable_code=code,
-                vulnerability_type=vulnerability_type
+                vulnerability_type=vulnerability_type,
+                problem_snippets=problem_snippets
             )
             
             validation_results['generated_fix'] = fix_code
@@ -406,6 +590,7 @@ Generate secure fixed code that addresses the vulnerability described above.
         # Add metadata
         validation_results['validated_at'] = datetime.now().isoformat()
         validation_results['model'] = CONFIG['model']
+        validation_results['code_input_source'] = code_source
         
         return validation_results
     
@@ -562,7 +747,19 @@ Generate secure fixed code that addresses the vulnerability described above.
                 
                 vuln_id = metadata['id']
                 filename = metadata.get('filename', json_path.stem + '.sol')
-                tier = metadata['tier']
+                # Prefer tier inferred from directory path to avoid legacy metadata mismatches.
+                parent_name = json_path.parent.name
+                if parent_name == 'tier_1_complete':
+                    tier = 'tier_1'
+                elif parent_name == 'tier_2_code_blocks':
+                    tier = 'tier_2'
+                elif parent_name == 'tier_3_snippets':
+                    tier = 'tier_3'
+                else:
+                    tier = metadata.get('tier', 'unknown')
+                    
+                # Keep metadata tier aligned with inferred extraction tier for downstream stats.
+                metadata['tier'] = tier
                 
                 print(f"[{idx}/{len(contract_files)}] Processing: {filename} ({tier}, id: {vuln_id})")
                 
@@ -697,7 +894,12 @@ Generate secure fixed code that addresses the vulnerability described above.
             category_map[item['id']] = {
                 'filename': item['filename'],
                 'tier': item['tier'],
-                'confidence': item['confidence']
+                'consistency_confidence': item.get('consistency_confidence', 0),
+                'classification_confidence': item.get('classification_confidence', 0),
+                'confidence': max(
+                    item.get('consistency_confidence', 0),
+                    item.get('classification_confidence', 0)
+                )
             }
         
         with open(VALIDATION_DIR / 'category_mapping.json', 'w') as f:
