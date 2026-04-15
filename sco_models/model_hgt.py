@@ -10,7 +10,6 @@ import torch.nn as nn
 import dgl.function as fn
 import torch.nn.functional as F
 from dgl.nn.functional import edge_softmax
-from torch_geometric.nn import MetaPath2Vec
 from .utils import load_meta_paths
 from .graph_utils import add_hetero_ids, \
                          load_hetero_nx_graph, \
@@ -255,6 +254,7 @@ class HGTVulNodeClassifier(nn.Module):
                 features[ntype] = self._nodetype2onehot(ntype).repeat(self.symmetrical_global_graph.num_nodes(ntype), 1).to(self.device)
             self.in_size = len(self.node_types)
         elif node_feature == 'metapath2vec':
+            from torch_geometric.nn import MetaPath2Vec
             embedding_dim = 128
             self.in_size = embedding_dim
             for metapath in self.meta_paths:
@@ -459,6 +459,7 @@ class HGTVulGraphClassifier(nn.Module):
                 features[ntype] = self._nodetype2onehot(ntype).repeat(self.symmetrical_global_graph.num_nodes(ntype), 1).to(self.device)
             self.in_size = len(self.node_types)
         elif node_feature == 'metapath2vec':
+            from torch_geometric.nn import MetaPath2Vec
             embedding_dim = 128
             self.in_size = embedding_dim
             for metapath in self.meta_paths:
