@@ -19,14 +19,13 @@ logs*/
 data/
 models/
 results/
-*.gpickle
+
 *.json
 forensics/graph_hiddends/*
 
 *.pdf
 **/downloaded_findings/**/*
 **/*_extracted_contracts/*
-**/graphs/**/*
 **/**/.env
 **/__pycache__/*
 solodit_test_data/*
