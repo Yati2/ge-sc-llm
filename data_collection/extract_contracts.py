@@ -10,15 +10,15 @@ from typing import Dict, List, Tuple, Optional
 import time
 
 # Configuration
-MARKDOWN_DIR = Path("markdown_files")
-OUTPUT_DIR = Path("extracted_contracts")
+MARKDOWN_DIR = Path("downloaded_findings/batch_4_solodit_findings/")
+OUTPUT_DIR = Path("batch_4_extracted_contracts")
 TIER_1_DIR = OUTPUT_DIR / "tier_1_complete"
 TIER_2_DIR = OUTPUT_DIR / "tier_2_code_blocks"
 TIER_3_DIR = OUTPUT_DIR / "tier_3_snippets"
 STATS_FILE = OUTPUT_DIR / "extraction_stats.json"
 FAILED_LOG = OUTPUT_DIR / "failed_extractions.log"
 SHARED_FILES_JSON = OUTPUT_DIR / "shared_github_files.json"
-FINDINGS_JSON = Path("solodit_sequential_findings.json")
+FINDINGS_JSON = MARKDOWN_DIR / "batch_4_solodit_findings.json"
 
 # GitHub API settings
 GITHUB_RAW_URL = "https://raw.githubusercontent.com"
@@ -1120,7 +1120,7 @@ class ContractExtractor:
     
     def run(self):
         """Run extraction on all markdown files."""
-        md_files = sorted(MARKDOWN_DIR.glob("*.md"))
+        md_files = sorted(p for p in MARKDOWN_DIR.rglob("*.md") if p.is_file())
         
         if not md_files:
             print(f"❌ No markdown files found in {MARKDOWN_DIR}")

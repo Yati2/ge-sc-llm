@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import time
 import re
 from urllib.parse import urlparse
+from pathlib import Path
 
 load_dotenv()
 
@@ -17,6 +18,8 @@ target_per_run = int(os.getenv("TARGET_RUNS"))
 
 
 url = "https://solodit.cyfrin.io/api/v1/solodit/findings"
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOAD_ROOT = BASE_DIR / "downloaded_findings"
 
 headers = {
     "Content-Type": "application/json",
@@ -44,6 +47,28 @@ def save_download_state(state):
     """Save the download state to file."""
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
+def load_processed_ids_from_batch_files(current_output_file):
+    processed_ids = set()
+    current_output_name = Path(current_output_file).name if current_output_file else None
+
+    for batch_file in sorted(DOWNLOAD_ROOT.glob("batch_*_solodit_findings.json")):
+        if current_output_name and batch_file.name == current_output_name:
+            continue
+
+        try:
+            with batch_file.open("r") as f:
+                findings = json.load(f)
+        except Exception as e:
+            print(f"  ⚠ Could not load prior batch file {batch_file.name}: {e}")
+            continue
+
+        for finding in findings:
+            finding_id = finding.get("id")
+            if finding_id is not None:
+                processed_ids.add(str(finding_id))
+
+    return processed_ids
 
 def extract_github_link(finding):
     """Extract GitHub link from finding's github_link or source_link field."""
@@ -127,18 +152,37 @@ else:
 
 print(f"Starting download from page {start_page} with page size {page_size}")
 
+processed_ids = load_processed_ids_from_batch_files(OUTPUT_FILE)
+
 if os.path.exists(OUTPUT_FILE):
     with open(OUTPUT_FILE, "r") as f:
-        all_findings = json.load(f)
+        existing_findings = json.load(f)
+
+    all_findings = []
+    current_file_ids = set()
+    removed_duplicates = 0
+
+    for finding in existing_findings:
+        finding_id = str(finding.get("id"))
+        if finding_id in processed_ids or finding_id in current_file_ids:
+            removed_duplicates += 1
+            continue
+
+        all_findings.append(finding)
+        current_file_ids.add(finding_id)
+        processed_ids.add(finding_id)
+
     print(f"Loaded {len(all_findings)} existing findings")
-    # Create a set of already-processed finding IDs to avoid duplicates
-    processed_ids = {f["id"] for f in all_findings}
+    if removed_duplicates > 0:
+        print(f"  ⏭ Removed {removed_duplicates} duplicate findings already present in earlier batch files")
 else:
     all_findings = []
-    processed_ids = set()
 
 page = start_page
 new_findings_this_run = 0
+
+markdown_output_dir = DOWNLOAD_ROOT / Path(OUTPUT_FILE).stem
+os.makedirs(markdown_output_dir, exist_ok=True)
 
 print(f"\nDownloading up to {target_per_run} findings...")
 
@@ -238,9 +282,6 @@ if not state.get("page_completed", True):
 if new_findings_this_run >= target_per_run:
     print(f"\n▶ Run the script again to download the next {target_per_run} findings.")
 
-# Step 5 — Save markdown files for new findings only
-os.makedirs("markdown_files", exist_ok=True)
-
 if new_findings_this_run > 0:
     print(f"\nSaving markdown files for {new_findings_this_run} new findings...")
     new_findings = all_findings[-new_findings_this_run:]  # Get only the new findings
@@ -262,7 +303,7 @@ if new_findings_this_run > 0:
         md_text += "## Content\n\n"
         md_text += content
 
-        with open(f"markdown_files/{fid}.md", "w") as f:
+        with open(markdown_output_dir / f"{fid}.md", "w") as f:
             f.write(md_text)
 
     print(f"✅ All done! {new_findings_this_run} markdown files saved.")

@@ -21,14 +21,19 @@ import networkx as nx
 
 # Edit these values directly when you want to change input/output locations.
 SETTINGS = {
-    "input_dir": "data_collection/extracted_contracts/tier_1_complete",
-    "output_dir": "graphs/testing/tier_1_complete_cfg_tree_sitter",
-    "tree_sitter_build_dir": "graphs/testing/tree_sitter_build",
+    "input_dir": "../data_collection/batch_3_extracted_contracts/tier_1_complete",
+    "output_dir": "../graphs/testing/batch_3/tier_1_cfg_graphs",
+    "tree_sitter_build_dir": "../graphs/testing/tree_sitter_build",
 }
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent
+
+
+def _workspace_root() -> Path:
+    here = Path(__file__).resolve().parent
+    return here.parent if here.name == "test" else here
 
 
 def _resolve_setting_path(repo_root: Path, value: str) -> Path:
@@ -146,6 +151,7 @@ def generate_graphs(input_dir: Path, output_dir: Path) -> Dict[str, object]:
 
 def main() -> int:
     repo_root = _repo_root()
+    workspace_root = _workspace_root()
 
     input_dir = _resolve_setting_path(repo_root, SETTINGS["input_dir"])
     output_dir = _resolve_setting_path(repo_root, SETTINGS["output_dir"])
@@ -155,8 +161,8 @@ def main() -> int:
         print(f"Input directory not found: {input_dir}")
         return 1
 
-    _ensure_import_path(repo_root)
-    lib_path = _build_language_library(repo_root, build_dir)
+    _ensure_import_path(workspace_root)
+    lib_path = _build_language_library(workspace_root, build_dir)
     print(f"Using tree-sitter library: {lib_path}")
 
     summary = generate_graphs(input_dir, output_dir)

@@ -26,8 +26,8 @@ CONFIG = {
 # Paths
 file_name = os.getenv("OUTPUT_FILE")
 FINDINGS_JSON = Path(file_name)
-EXTRACTED_DIR = Path("extracted_contracts")
-VALIDATION_DIR = Path("validation_results")
+EXTRACTED_DIR = Path("batch_4_extracted_contracts")
+VALIDATION_DIR = Path("batch_4_extracted_contracts/validation_results")
 
 # MANDO category definitions
 MANDO_CATEGORIES = {
@@ -724,7 +724,8 @@ Generate secure fixed code that addresses the vulnerability described above.
         
         # Gather all metadata JSON files
         all_files = []
-        for tier_dir in ['tier_1_complete', 'tier_2_code_blocks', 'tier_3_snippets']:
+        # for tier_dir in ['tier_1_complete', 'tier_2_code_blocks', 'tier_3_snippets']:
+        for tier_dir in ['tier_1_complete']:
             tier_path = EXTRACTED_DIR / tier_dir
             if tier_path.exists():
                 all_files.extend(tier_path.glob('*.json'))

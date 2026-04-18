@@ -8,12 +8,12 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
-MARKDOWN_DIR = Path("markdown_files")
+MARKDOWN_DIR = Path("downloaded_findings")
 
 
 def analyze_markdown_files():
     """Analyze all markdown files and provide statistics."""
-    md_files = list(MARKDOWN_DIR.glob("*.md"))
+    md_files = sorted(p for p in MARKDOWN_DIR.rglob("*.md") if p.is_file())
     
     if not md_files:
         print(f"❌ No markdown files found in {MARKDOWN_DIR}")

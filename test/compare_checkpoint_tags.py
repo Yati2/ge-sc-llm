@@ -25,6 +25,8 @@ Notes:
 - suitable_tag uses existing_tag only when tag_correct is true; otherwise it picks the
     highest-confidence tag among suggested_tag, mando_primary_category, and
     scsvs_primary_category_name.
+- winner_tag compares suitable_tag confidence against pred_highest_prob confidence;
+    ties prefer suitable_tag so the reference side remains stable.
 
 Core comparison excludes rows with runtime errors, but errors are reported
 separately in a dedicated audit file.
@@ -39,9 +41,9 @@ from typing import Dict, List, Optional
 
 
 SETTINGS = {
-    "predictions_json": "graphs/testing/cfg_only_all_checkpoint_predictions.json",
-    "json_dir": "data_collection/extracted_contracts/tier_1_complete",
-    "output_dir": "graphs/testing/consistency_reports",
+    "predictions_json": "graphs/testing/batch_3/cfg_only_all_checkpoint_predictions.json",
+    "json_dir": "data_collection/batch_3_extracted_contracts/tier_1_complete",
+    "output_dir": "graphs/testing/batch_3/consistency_reports",
 }
 
 
@@ -132,6 +134,7 @@ def _extract_tag_metadata(json_obj: Dict) -> Dict[str, str]:
 
     if existing_tag and tag_correct is True:
         suitable_tag = _normalize_tag(existing_tag)
+        suitable_conf = 100.0
     else:
         candidates = [
             (_normalize_tag(suggested_tag), suggested_conf),
@@ -139,7 +142,11 @@ def _extract_tag_metadata(json_obj: Dict) -> Dict[str, str]:
             (_normalize_tag(scsvs_primary), scsvs_conf),
         ]
         valid_candidates = [(tag, conf) for tag, conf in candidates if tag]
-        suitable_tag = max(valid_candidates, key=lambda x: x[1])[0] if valid_candidates else ""
+        if valid_candidates:
+            suitable_tag, suitable_conf = max(valid_candidates, key=lambda x: x[1])
+        else:
+            suitable_tag = ""
+            suitable_conf = 0.0
 
 
     return {
@@ -153,6 +160,7 @@ def _extract_tag_metadata(json_obj: Dict) -> Dict[str, str]:
         "scsvs_primary_category": scsvs_primary or "",
         "scsvs_confidence": f"{scsvs_conf:.2f}",
         "suitable_tag": suitable_tag,
+        "suitable_tag_confidence": f"{suitable_conf:.2f}",
     }
 
 
@@ -186,6 +194,7 @@ def _base_file_row(contract_name: str, selection: Dict[str, str]) -> Dict[str, s
         "scsvs_primary_category": selection["scsvs_primary_category"],
         "scsvs_confidence": selection["scsvs_confidence"],
         "suitable_tag": selection["suitable_tag"],
+        "suitable_tag_confidence": selection["suitable_tag_confidence"],
     }
 
 
@@ -337,6 +346,7 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
         positive_tags = sorted(file_entry["positive_tags"])
 
         pred_highest_prob = ""
+        pred_highest_prob_confidence = 0.0
         highest_prob = -1.0
         for pred in file_entry["all_checkpoint_predictions"]:
             if pred.get("predicted_label") != "1":
@@ -345,6 +355,7 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
             if prob1 > highest_prob:
                 highest_prob = prob1
                 pred_highest_prob = pred.get("checkpoint_tag", "")
+                pred_highest_prob_confidence = prob1
 
         if rows_total > 0:
             summary["files_with_predictions"] += 1
@@ -376,6 +387,23 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
                 summary["files_tag_mismatch"] += 1
             summary["files_tag_evaluated"] += 1
 
+        suitable_confidence = _as_float(selection["suitable_tag_confidence"])
+        winner_tag = ""
+        winner_confidence = 0.0
+        if suitable_tag and pred_highest_prob:
+            if suitable_confidence >= pred_highest_prob_confidence:
+                winner_tag = suitable_tag
+                winner_confidence = suitable_confidence
+            else:
+                winner_tag = pred_highest_prob
+                winner_confidence = pred_highest_prob_confidence
+        elif suitable_tag:
+            winner_tag = suitable_tag
+            winner_confidence = suitable_confidence
+        elif pred_highest_prob:
+            winner_tag = pred_highest_prob
+            winner_confidence = pred_highest_prob_confidence
+
         row = {
             "consistency_status": consistency_status,
             **_base_file_row(contract_name, selection),
@@ -383,6 +411,9 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
             "ok_rows": str(rows_ok),
             "error_rows": str(rows_error),
             "pred_highest_prob": pred_highest_prob,
+            "pred_highest_prob_confidence": f"{pred_highest_prob_confidence:.6f}" if pred_highest_prob else "",
+            "winner_tag": winner_tag,
+            "winner_confidence": f"{winner_confidence:.6f}" if winner_tag else "",
             "error_messages": "|".join(sorted(file_entry["error_messages"])),
             "all_checkpoint_predictions": file_entry["all_checkpoint_predictions"],
         }
@@ -441,10 +472,14 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
         "scsvs_primary_category",
         "scsvs_confidence",
         "suitable_tag",
+        "suitable_tag_confidence",
         "total_checkpoints",
         "ok_rows",
         "error_rows",
         "pred_highest_prob",
+        "pred_highest_prob_confidence",
+        "winner_tag",
+        "winner_confidence",
         "error_messages",
         "consistency_status",
         "all_checkpoint_predictions",
@@ -462,6 +497,7 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
         "scsvs_primary_category",
         "scsvs_confidence",
         "suitable_tag",
+        "suitable_tag_confidence",
         "audit_status",
     ]
 

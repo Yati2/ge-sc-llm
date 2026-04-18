@@ -24,12 +24,13 @@ results/
 forensics/graph_hiddends/*
 
 *.pdf
-**/markdown_files/*
-**/extracted_contracts/*
+**/downloaded_findings/**/*
+**/*_extracted_contracts/*
 **/graphs/**/*
 **/**/.env
 **/__pycache__/*
 solodit_test_data/*
 REPOSITORY_GUIDE.md
 show_flow.py
+
 
