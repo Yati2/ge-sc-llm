@@ -1,114 +1,154 @@
-## 🔧  `extract_contracts.py`
+# Data Collection Pipeline
 
-### Purpose
-Extract Solidity contracts from markdown files using a 3-tier priority system.
+This folder contains the end-to-end data preparation pipeline for collecting vulnerability reports, extracting Solidity code artifacts, and validating extracted artifacts with LLM-based checks.
 
-### Extraction Priority System
+## Overview
 
-The script follows a **decision tree** to extract the highest quality code:
+The usual workflow is:
+
+1. Download findings from Solodit API.
+2. Extract Solidity artifacts from report content and linked GitHub sources.
+3. Validate extracted artifacts and enrich metadata with consistency checks and vulnerability classifications.
+
+Main scripts:
+
+- `download.py`: fetch report data and persist it as batch JSON + markdown files.
+- `analyze_data.py`: inspect markdown coverage and estimate extraction quality before extraction.
+- `extract_contracts.py`: produce tiered Solidity artifacts and metadata.
+- `validate_with_openai.py`: validate extracted artifacts and append classification/quality fields.
+
+## Script Details
+
+### 1) `download.py`
+
+Purpose:
+- Pull findings from Solodit API using pagination.
+- Resume safely across runs with a state file.
+- Deduplicate against prior batch JSON files.
+- Save findings JSON and per-finding markdown files.
+
+Key behavior:
+- Uses `.env` values like `SOLODIT_API_KEY`, `PAGE_SIZE`, `TARGET_RUNS`, `STATE_FILE`, and `OUTPUT_FILE`.
+- Stops cleanly when an API page returns zero findings.
+- If the run stops mid-page (target reached), marks the page as incomplete and resumes from the same page on the next run.
+
+Outputs:
+- Batch findings JSON (for example under `downloaded_findings/`).
+- Markdown files in a folder named from `OUTPUT_FILE` stem.
+- Updated download state JSON.
+
+### 2) `analyze_data.py`
+
+Purpose:
+- Survey all markdown files under `downloaded_findings/`.
+- Report how many files contain GitHub `.sol` links, code blocks, inline snippets, and no extractable code.
+
+When to use:
+- Run before extraction to understand expected Tier 1/2/3 yield.
+
+### 3) `extract_contracts.py`
+
+Purpose:
+- Extract Solidity code artifacts using a 3-tier priority system.
+
+Tier priority:
 
 ```
-PRIORITY 1: GitHub .sol Files (Tier 1)
-    ↓ (if download fails or no GitHub links)
-PRIORITY 2: Code Blocks from Markdown (Tier 2)
-    ↓ (if no quality code blocks)
-PRIORITY 3: Inline Snippets (Tier 3)
+Tier 1: GitHub .sol files (highest quality)
+    -> fallback if unavailable
+Tier 2: Solidity code blocks from markdown
+    -> fallback if unavailable
+Tier 3: Combined snippets from remaining inline content
 ```
 
----
+Current default configuration in this script points to batch 4 paths:
+- `downloaded_findings/batch_4_solodit_findings/`
+- `batch_4_extracted_contracts/`
 
-## 📁 Tier System Explained
+Extraction notes:
+- Tier 1 downloads full `.sol` files from GitHub, ignoring line-anchor fragments for retrieval.
+- Tier 2 keeps stronger Solidity code blocks that satisfy quality checks.
+- Tier 3 combines multiple snippet fragments from one finding into one output artifact.
 
-### **Tier 1: Complete GitHub Files** 
-**Source**: GitHub raw URLs
+Outputs (under output batch directory):
+- `tier_1_complete/`
+- `tier_2_code_blocks/`
+- `tier_3_snippets/`
+- `extraction_stats.json`
+- `shared_github_files.json`
+- `failed_extractions.log`
 
-**Characteristics**:
-- Complete, production-ready Solidity files
-- Downloaded from GitHub repositories
-- **Deduplication**: Each unique .sol file downloaded only ONCE
-- **Smart handling**: Ignores line numbers (`#L97-L100`) and downloads full file
-- **Stops early**: First successful download per finding
-- **Retry logic**: Handles 404s, rate limits with exponential backoff
+### 4) `validate_with_openai.py`
 
-**Quality Requirements**: 
-- ✅ Successfully downloaded from GitHub (HTTP 200)
-- ✅ Valid .sol file
+Purpose:
+- Validate extracted artifacts against their source finding.
+- Enrich each metadata JSON with consistency checks, tag checks, and vulnerability classification.
 
-**Metadata Includes**:
-- `source_url`: Original GitHub link
-- `vulnerable_lines`: Line numbers mentioned (informational)
-- `filename`: Original GitHub filename
-- Quality metrics (pragma, contract, functions, etc.)
+Validation responsibilities:
+- Content-code consistency validation.
+- Existing tag correctness checks and suggested corrections.
+- Classification into MANDO categories and SCSVS categories.
+- Fix-code handling (use provided recommendation fix blocks or generate when needed).
 
-**Example**:
+Current default configuration points to batch 4 paths:
+- Input extracted dir: `batch_4_extracted_contracts`
+- Output validation dir: `batch_4_extracted_contracts/validation_results`
+
+Detailed validation flow is documented in `README_VALIDATION.md`.
+
+## Configuration
+
+Use `.env` to configure API, rate limits, model settings, file names, and confidence thresholds.
+
+Common fields used across scripts:
+
+- Solodit/API fields:
+    - `SOLODIT_API_KEY`
+    - `PAGE_SIZE`
+    - `TARGET_RUNS`
+    - `STATE_FILE`
+    - `OUTPUT_FILE`
+- OpenAI validation fields:
+    - `OPENAI_API_KEY`
+    - `OPENAI_MODEL`
+    - `OPENAI_TEMPERATURE`
+    - `OPENAI_RATE_LIMIT_DELAY`
+    - `OPENAI_RETRY_ATTEMPTS`
+    - `CONFIDENCE_HIGH`
+    - `CONFIDENCE_MEDIUM`
+    - `CONFIDENCE_LOW`
+
+See `.env.example` for baseline variable names.
+
+## Typical Run Order
+
+From this folder:
+
+```bash
+python download.py
+python analyze_data.py
+python extract_contracts.py
+python validate_with_openai.py
 ```
-64660.md → Oracle.sol (Tier 1)
-- URL: https://github.com/.../Oracle.sol#L97-L100
-- Downloaded complete file (17,656 bytes)
-- Vulnerable lines: [97, 100] (metadata only)
+
+Optional quick validation run:
+
+```bash
+python validate_with_openai.py --test
 ```
 
----
+## Batch-Oriented Layout
 
-### **Tier 2: Code Blocks** 
-**Source**: Markdown code blocks (```solidity, ```sol, or ``` with Solidity)
+This repository uses batch folders (for example `batch_1_extracted_contracts`, `batch_2_extracted_contracts`, etc.) to keep runs isolated and reproducible.
 
-**Characteristics**:
-- High-quality code blocks from markdown
-- Near-complete contract implementations
-- Multiple blocks from same file kept separate
+Recommended practice:
 
-**Quality Requirements**:
-- ✅ Has `pragma solidity`
-- ✅ Has `contract`, `interface`, or `library` declaration
-- ✅ Balanced braces `{}`
-- ✅ More than 20 lines
+1. Keep each download/extract/validate cycle scoped to one batch folder.
+2. Avoid mixing outputs from different batches in the same extraction directory.
+3. Keep `OUTPUT_FILE` and extraction/validation directories aligned to the same batch.
 
-**Example**:
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+## Notes
 
-contract VulnerableContract {
-    // Complete contract code from markdown
-    function vulnerable() external { ... }
-}
-```
-
----
-
-### **Tier 3: Combined Snippets** 
-**Source**: Inline code and function snippets
-
-**Characteristics**:
-- **COMBINED**: All snippets from same finding merged into ONE .sol file
-- Separated by clear dividers: `// ========== Code Block N ==========`
-- Marked with `"is_combined": true` in metadata
-- Useful for context and analysis
-- May be incomplete (missing imports, pragma, etc.)
-
-**Quality Requirements**:
-- ✅ Contains function definitions or Solidity keywords
-- ✅ More than 5 lines OR has recognizable function signature
-- ⚠️ May not compile standalone
-
-**Metadata Includes**:
-- `is_combined`: true
-- `num_blocks`: Number of snippets merged
-- `block_sources`: Array showing origin of each snippet
-
-**Example**:
-```solidity
-// ========== Code Block 1 ==========
-// Source: markdown_code_block
-function vulnerable(uint amount) external {
-    balance += amount;  // Integer overflow
-}
-
-// ========== Code Block 2 ==========
-// Source: inline_content
-function withdraw() external {
-    msg.sender.call{value: balance}("");  // Reentrancy
-}
-```
+- Some scripts currently hardcode batch-specific paths (especially extraction and validation scripts). Update path constants before running a different batch.
+- Downloading and validation are designed to be resumable and robust to partial failures; reruns should continue from saved state and existing outputs.
 
