@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import json
 import re
@@ -27,7 +28,8 @@ MAX_RETRIES = 3  # Retry failed downloads
 
 
 class ContractExtractor:
-    def __init__(self):
+    def __init__(self, start_from_id: Optional[str] = None):
+        self.start_from_id = str(start_from_id) if start_from_id is not None else None
         self.stats = {
             "total_processed": 0,
             "successful_extractions": 0,
@@ -1121,13 +1123,20 @@ class ContractExtractor:
     def run(self):
         """Run extraction on all markdown files."""
         md_files = sorted(p for p in MARKDOWN_DIR.rglob("*.md") if p.is_file())
+
+        if self.start_from_id is not None:
+            md_files = [p for p in md_files if p.stem.isdigit() and int(p.stem) >= int(self.start_from_id)]
         
         if not md_files:
             print(f"❌ No markdown files found in {MARKDOWN_DIR}")
+            if self.start_from_id is not None:
+                print(f"ℹ️  Start filter active: id >= {self.start_from_id}")
             return
         
         print(f"🚀 Starting extraction on {len(md_files)} files")
         print(f"📁 Output directory: {OUTPUT_DIR}")
+        if self.start_from_id is not None:
+            print(f"⏭️  Starting from vulnerability id >= {self.start_from_id}")
         
         for md_path in md_files:
             self.process_markdown_file(md_path)
@@ -1137,7 +1146,16 @@ class ContractExtractor:
 
 
 def main():
-    extractor = ContractExtractor()
+    parser = argparse.ArgumentParser(description="Extract Solidity contracts from Solodit markdown findings")
+    parser.add_argument(
+        "--start-from-id",
+        type=str,
+        default=None,
+        help="Only process markdown findings whose numeric ID is >= this value (e.g., 41922)",
+    )
+    args = parser.parse_args()
+
+    extractor = ContractExtractor(start_from_id=args.start_from_id)
     extractor.run()
 
 

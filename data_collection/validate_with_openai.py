@@ -724,8 +724,8 @@ Generate secure fixed code that addresses the vulnerability described above.
         
         # Gather all metadata JSON files
         all_files = []
-        # for tier_dir in ['tier_1_complete', 'tier_2_code_blocks', 'tier_3_snippets']:
-        for tier_dir in ['tier_1_complete']:
+        for tier_dir in [ 'tier_2_code_blocks', 'tier_3_snippets']:
+      
             tier_path = EXTRACTED_DIR / tier_dir
             if tier_path.exists():
                 all_files.extend(tier_path.glob('*.json'))

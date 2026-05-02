@@ -21,8 +21,8 @@ import networkx as nx
 
 # Edit these values directly when you want to change input/output locations.
 SETTINGS = {
-    "input_dir": "../data_collection/batch_3_extracted_contracts/tier_1_complete",
-    "output_dir": "../graphs/testing/batch_3/tier_1_cfg_graphs",
+    "input_dir": "../data_collection/batch_4_extracted_contracts/tier_1_complete",
+    "output_dir": "../graphs/testing/batch_4/tier_1_complete_cfg_graphs",
     "tree_sitter_build_dir": "../graphs/testing/tree_sitter_build",
 }
 

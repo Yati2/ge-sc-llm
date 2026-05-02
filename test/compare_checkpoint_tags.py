@@ -41,9 +41,9 @@ from typing import Dict, List, Optional
 
 
 SETTINGS = {
-    "predictions_json": "graphs/testing/batch_3/cfg_only_all_checkpoint_predictions.json",
-    "json_dir": "data_collection/batch_3_extracted_contracts/tier_1_complete",
-    "output_dir": "graphs/testing/batch_3/consistency_reports",
+    "predictions_json": "graphs/testing/batch_3/tier_3_cfg_only_all_checkpoint_predictions.json",
+    "json_dir": "data_collection/batch_3_extracted_contracts/tier_3_snippets",
+    "output_dir": "graphs/testing/batch_3/tier_3_consistency_reports",
 }
 
 
@@ -357,6 +357,8 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
                 pred_highest_prob = pred.get("checkpoint_tag", "")
                 pred_highest_prob_confidence = prob1
 
+        suitable_tag = selection["suitable_tag"]
+
         if rows_total > 0:
             summary["files_with_predictions"] += 1
         else:
@@ -378,7 +380,6 @@ def build_reports(predictions_json: Path, json_dir: Path, output_dir: Path) -> D
             summary["files_no_positive_prediction"] += 1
 
         else:
-            suitable_tag = selection["suitable_tag"]
             if suitable_tag and pred_highest_prob and suitable_tag == pred_highest_prob:
                 consistency_status = "match"
                 summary["files_tag_match"] += 1

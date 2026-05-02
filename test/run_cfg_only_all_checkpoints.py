@@ -25,11 +25,11 @@ from sco_models.model_hgt_with_guardrails import HGTVulGraphClassifier
 
 
 SETTINGS = {
-    "gpickle_dir": "graphs/testing/batch_3/tier_1_cfg_graphs",
+    "gpickle_dir": "graphs/testing/batch_1/tier_3_cfg_graphs",
     "checkpoint_dir": "checkpoints/graph_detection/nodetype",
     "checkpoint_glob": "*_tree_sitter_cfg_cg_hgt.pth",
     "device": "cpu",
-    "output_json": "graphs/testing/batch_3/cfg_only_all_checkpoint_predictions.json",
+    "output_json": "graphs/testing/batch_1/tier_3_cfg_only_all_checkpoint_predictions.json",
 }
 
 
