@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import sys
+import re
 from pathlib import Path
 
 import torch
@@ -210,12 +211,17 @@ def run_for_graph(graph_path: Path, ckpt_path: Path, node_feature: str, device: 
     for node_id, node_data in nxg.nodes(data=True):
         try:
             pred = int(preds[int(node_id)])
+            confidence = float(
+                probs[int(node_id), 1].item()
+            )  # Probability of vulnerable class
         except Exception:
             pred = None
+            confidence = None
         if pred == 1:
             vulnerable.append(
                 {
                     "node_id": int(node_id),
+                    "confidence": confidence,
                     "lines": safe_lines(node_data),
                     "source_file": node_data.get("source_file"),
                     "method": node_data.get("method"),
@@ -234,11 +240,37 @@ def run_for_graph(graph_path: Path, ckpt_path: Path, node_feature: str, device: 
     }
 
 
+def discover_available_nodetypes(batch_dir: Path):
+    """Discover available node-detection checkpoints and normalize category names.
+
+    Instead of using graph node_type values, we discover available
+    vulnerability checkpoints under `checkpoints/node_detection/nodetype/` and
+    return a list of dicts with keys: `category` and `path`.
+    """
+    ckpt_dir = Path(_REPO_ROOT) / "checkpoints" / "node_detection" / "nodetype"
+    if not ckpt_dir.exists():
+        print(f"⚠️  Checkpoint directory not found: {ckpt_dir}")
+        return []
+
+    ckpts = sorted(ckpt_dir.glob("*.pth"))
+    models = []
+    for p in ckpts:
+        name = p.stem
+        # Normalize names by stripping common suffixes
+        category = re.sub(
+            r"(_tree_sitter_cfg_cg_hgt|_tree_sitter_cfg_cg|_tree_sitter|_hgt)$",
+            "",
+            name,
+        )
+        models.append({"category": category, "path": p})
+
+    return models
+
+
 def main() -> int:
     graph_path = SETTINGS.get("graph")
     batch_dir = SETTINGS.get("batch_dir")
     ckpt_path = Path(SETTINGS["checkpoint"])
-    node_feature = SETTINGS["node_feature"]
     device = SETTINGS["device"]
     if not ckpt_path.exists():
         print(f"❌ Missing checkpoint: {ckpt_path}")
@@ -250,6 +282,7 @@ def main() -> int:
             print(f"❌ Missing graph: {graph_path}")
             return 1
         print(f"📊 Loading graph: {graph_path}")
+        node_feature = SETTINGS["node_feature"]
         out = run_for_graph(graph_path, ckpt_path, node_feature, device)
         print(f"\n✅ Found {out['vulnerable_nodes_count']} vulnerable nodes")
         print(json.dumps(out, indent=2))
@@ -268,70 +301,109 @@ def main() -> int:
     print(f"📊 Running batch inference under: {batch_dir}")
     print(f"📁 Found {len(graph_files)} graphs across all tiers")
 
+    # Discover available node-detection checkpoints (categories)
+    available_models = discover_available_nodetypes(batch_dir)
+    if not available_models:
+        print("❌ No node-detection checkpoints found; aborting")
+        return 1
+    categories = [m["category"] for m in available_models]
+    print(f"🔍 Discovered categories: {categories}")
+
+    # Create output directory for all nodetype results
+    output_dir = batch_dir / "node_level_predictions_by_nodetype"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Output directory: {output_dir}")
+
     tier_groups = {}
     for graph_file in graph_files:
         tier_name = graph_file.parent.name
         tier_groups.setdefault(tier_name, []).append(graph_file)
 
-    summary_rows = []
-    for tier_name, tier_graphs in sorted(tier_groups.items()):
-        print(f"\n📦 Tier {tier_name}: {len(tier_graphs)} graphs")
-        tier_rows = []
-        for index, graph_file in enumerate(tier_graphs, start=1):
-            print(f"[{index}/{len(tier_graphs)}] {graph_file.name}")
-            try:
-                tier_rows.append(
-                    run_for_graph(graph_file, ckpt_path, node_feature, device)
-                )
-            except Exception as exc:
-                tier_rows.append(
-                    {
-                        "graph": str(graph_file),
-                        "checkpoint": str(ckpt_path),
-                        "node_feature": node_feature,
-                        "device": device,
-                        "total_nodes": 0,
-                        "vulnerable_nodes_count": 0,
-                        "vulnerable_nodes": [],
-                        "error": str(exc),
-                    }
-                )
+    # Loop through each discovered checkpoint/category
+    all_results = {}
+    for model_info in available_models:
+        category = model_info["category"]
+        ckpt = model_info["path"]
+        print(f"\n{'='*60}")
+        print(
+            f"📊 Running inference for category: {category}  (checkpoint: {ckpt.name})"
+        )
+        print(f"{'='*60}")
 
-        tier_output_json = batch_dir / f"{tier_name}_node_level_predictions.json"
-        tier_out = {
-            "summary": {
-                "batch_dir": str(batch_dir),
-                "tier": tier_name,
-                "checkpoint": str(ckpt_path),
-                "node_feature": node_feature,
-                "device": device,
-                "total_graphs": len(tier_graphs),
-                "ok": sum(1 for row in tier_rows if not row.get("error")),
-                "error": sum(1 for row in tier_rows if row.get("error")),
-                "output_json": str(tier_output_json),
-            },
-            "rows": tier_rows,
+        summary_rows = []
+        # Use configured node_feature (attribute name) for model input
+        node_feature = SETTINGS.get("node_feature", "nodetype")
+
+        for tier_name, tier_graphs in sorted(tier_groups.items()):
+            print(f"\n📦 Tier {tier_name}: {len(tier_graphs)} graphs")
+            tier_rows = []
+            for index, graph_file in enumerate(tier_graphs, start=1):
+                print(f"[{index}/{len(tier_graphs)}] {graph_file.name}")
+                try:
+                    tier_rows.append(
+                        run_for_graph(graph_file, ckpt, node_feature, device)
+                    )
+                except Exception as exc:
+                    tier_rows.append(
+                        {
+                            "graph": str(graph_file),
+                            "checkpoint": str(ckpt),
+                            "node_feature": node_feature,
+                            "device": device,
+                            "total_nodes": 0,
+                            "vulnerable_nodes_count": 0,
+                            "vulnerable_nodes": [],
+                            "error": str(exc),
+                        }
+                    )
+
+            tier_output_json = (
+                output_dir / f"{tier_name}_node_level_predictions_{category}.json"
+            )
+            tier_out = {
+                "summary": {
+                    "batch_dir": str(batch_dir),
+                    "tier": tier_name,
+                    "category": category,
+                    "checkpoint": str(ckpt),
+                    "device": device,
+                    "total_graphs": len(tier_graphs),
+                    "ok": sum(1 for row in tier_rows if not row.get("error")),
+                    "error": sum(1 for row in tier_rows if row.get("error")),
+                    "output_json": str(tier_output_json),
+                },
+                "rows": tier_rows,
+            }
+            tier_output_json.write_text(
+                json.dumps(tier_out, indent=2), encoding="utf-8"
+            )
+            summary_rows.append(tier_out["summary"])
+            print(f"✅ Wrote tier output to {tier_output_json}")
+
+        # Store results for this category
+        all_results[category] = {
+            "category": category,
+            "checkpoint": str(ckpt),
+            "tier_summaries": summary_rows,
         }
-        tier_output_json.write_text(json.dumps(tier_out, indent=2), encoding="utf-8")
-        summary_rows.append(tier_out["summary"])
-        print(f"✅ Wrote tier output to {tier_output_json}")
 
-    out = {
+    # Create master manifest for all nodetypes
+    manifest_out = {
         "summary": {
             "batch_dir": str(batch_dir),
-            "checkpoint": str(ckpt_path),
-            "node_feature": node_feature,
             "device": device,
             "tiers": len(tier_groups),
             "total_graphs": len(graph_files),
+            "categories_tested": list(all_results.keys()),
         },
-        "tier_summaries": summary_rows,
+        "results_by_category": all_results,
     }
 
-    manifest_json = batch_dir / "node_level_predictions_manifest.json"
-    manifest_json.write_text(json.dumps(out, indent=2), encoding="utf-8")
-    print(f"\n✅ Wrote batch manifest to {manifest_json}")
-    print(json.dumps(out["summary"], indent=2))
+    manifest_json = output_dir / "manifest_all_nodetypes.json"
+    manifest_json.write_text(json.dumps(manifest_out, indent=2), encoding="utf-8")
+    print(f"\n✅ Wrote master manifest to {manifest_json}")
+    print(f"📁 All results saved to: {output_dir}")
+    print(json.dumps(manifest_out["summary"], indent=2))
     return 0
 
 

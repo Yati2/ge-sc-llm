@@ -2,6 +2,17 @@
 
 This folder contains the end-to-end data preparation pipeline for collecting vulnerability reports, extracting Solidity code artifacts, and validating extracted artifacts with LLM-based checks.
 
+## Quick Stats
+
+| | Downloaded | Extracted (Tier 1) | Extracted (Tier 2) | Extracted (Tier 3) | Total Extracted |
+|---|---|---|---|---|---|
+| **Batch 1** | 100 | 80 | 0 | 15 | 95 |
+| **Batch 2** | 100 | 16 | 0 | 71 | 87 |
+| **Batch 3** | 100 | 16 | 8 | 63 | 87 |
+| **Batch 4** | 19327 | 7714 | 137 | 5030 | 12881 |
+| **TOTAL** | 19666 | 7826 | 145 | 5179 | 13150 |
+
+
 ## Overview
 
 The usual workflow is:
